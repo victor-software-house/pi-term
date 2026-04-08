@@ -5,13 +5,18 @@ via batched protobuf API (one message for all 22 color properties).
 
 Protocol: one JSON object per line on stdin.
   {"cmd":"apply","colors":{"Background Color":"282a36",...}}
-  {"cmd":"snapshot"}    -> prints snapshot JSON to stdout
+    Session-local preview (ephemeral, doesn't affect new tabs).
+  {"cmd":"persist","colors":{"Background Color":"282a36",...}}
+    Writes to the actual profile (persists across new tabs/windows).
+  {"cmd":"snapshot"}
+    Capture current colors. Response: {"ok":true,"snapshot":{...}}
   {"cmd":"restore","snapshot":{...}}
+    Restore session-local colors from a snapshot.
   {"cmd":"quit"}
 
 Responses: one JSON object per line on stdout.
   {"ok":true}
-  {"ok":true,"snapshot":{...}}
+  {"ok":true,"snapshot":{...},"profileGuid":"..."}
   {"error":"..."}
 """
 import asyncio
@@ -19,6 +24,16 @@ import json
 import sys
 
 import iterm2
+
+
+def build_lwop(colors: dict) -> iterm2.LocalWriteOnlyProfile:
+    """Build a LocalWriteOnlyProfile from a hex color dict."""
+    lwop = iterm2.LocalWriteOnlyProfile()
+    for key, hex_val in colors.items():
+        h = hex_val.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        lwop._color_set(key, iterm2.Color(r, g, b))
+    return lwop
 
 
 async def main():
@@ -56,15 +71,30 @@ async def main():
             break
 
         elif cmd == "apply":
+            # Session-local preview — doesn't persist to profile
             try:
                 session = get_session()
+                lwop = build_lwop(msg["colors"])
+                await session.async_set_profile_properties(lwop)
+                respond({"ok": True})
+            except Exception as e:
+                respond({"error": str(e)})
+
+        elif cmd == "persist":
+            # Write to the actual profile — persists across new tabs/windows
+            try:
+                session = get_session()
+                profile = await session.async_get_profile()
+                guid = profile.all_properties.get("Guid", None)
+                if not guid:
+                    respond({"error": "could not determine profile GUID"})
+                    continue
                 colors = msg["colors"]
-                lwop = iterm2.LocalWriteOnlyProfile()
                 for key, hex_val in colors.items():
                     h = hex_val.lstrip("#")
                     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-                    lwop._color_set(key, iterm2.Color(r, g, b))
-                await session.async_set_profile_properties(lwop)
+                    color = iterm2.Color(r, g, b)
+                    await profile._async_color_set(key, color)
                 respond({"ok": True})
             except Exception as e:
                 respond({"error": str(e)})
@@ -84,7 +114,8 @@ async def main():
                         snap[key] = {"r": c.red, "g": c.green, "b": c.blue}
                     except Exception:
                         pass
-                respond({"ok": True, "snapshot": snap})
+                guid = profile.all_properties.get("Guid", "")
+                respond({"ok": True, "snapshot": snap, "profileGuid": guid})
             except Exception as e:
                 respond({"error": str(e)})
 

@@ -150,6 +150,15 @@ export function restoreSnapshotSync(snapshot: ItermThemeSnapshot): void {
 	sendBridgeCommand({ cmd: "restore", snapshot });
 }
 
+/**
+ * Persist theme to the actual iTerm2 profile — survives new tabs/windows.
+ * Fire-and-forget. Call on confirm only, not during preview.
+ */
+export function persistThemeToProfile(theme: ThemeEntry): void {
+	if (!isItermReady()) return;
+	sendBridgeCommand({ cmd: "persist", colors: themeToColorMap(theme) });
+}
+
 // --- Legacy async wrappers ---
 
 export async function applyThemeToIterm(theme: ThemeEntry, _sessionId: string): Promise<void> {

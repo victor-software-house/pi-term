@@ -20,6 +20,7 @@ import {
 	captureItermSnapshot,
 	applyThemeToItermSync,
 	restoreSnapshotSync,
+	persistThemeToProfile,
 	isItermReady,
 	type ItermThemeSnapshot,
 } from "./iterm2.js";
@@ -105,7 +106,8 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// Persist Pi theme — synchronous
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
 
-		applyThemeToItermSync(entry);
+		// Persist to iTerm2 profile so new tabs get the theme too
+		persistThemeToProfile(entry);
 
 		done(themeName);
 	};

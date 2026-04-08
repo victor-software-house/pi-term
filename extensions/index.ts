@@ -29,7 +29,7 @@ import {
 } from "./settings.js";
 import { DEFAULT_THEME_PARAMS, type SessionContext, type ThemeParams } from "./types.js";
 import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
-import { initItermConnection, applyThemeToItermSync } from "./iterm2.js";
+import { initItermConnection, persistThemeToProfile } from "./iterm2.js";
 import { debounce } from "perfect-debounce";
 
 const STATUS_KEY = "terminal-theme";
@@ -413,7 +413,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const params = getThemeParams(slugifyThemeName(themeArg));
 				writeAndSetPiTheme(ctx, theme.colors, themeArg, params);
-				applyThemeToItermSync(theme);
+				persistThemeToProfile(theme);
 				updateStatus(ctx, themeArg, params);
 				ctx.ui.notify(`Theme "${themeArg}" applied`, "info");
 				return;
