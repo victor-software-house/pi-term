@@ -29,7 +29,7 @@ import {
 } from "./settings.js";
 import { DEFAULT_THEME_PARAMS, type SessionContext, type ThemeParams } from "./types.js";
 import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
-import { getActiveItermSessionId, applyThemeToIterm } from "./iterm2.js";
+import { initItermConnection, getSessionId, applyThemeToIterm } from "./iterm2.js";
 import { debounce } from "perfect-debounce";
 
 const STATUS_KEY = "terminal-theme";
@@ -385,8 +385,10 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		loadSettings(ctx.cwd);
 		cachedThemeNames = EMBEDDED_THEMES.map((e) => e.name);
-		await captureRunner(pi);
-		// Auto-sync disabled in initial iTerm2 migration — only explicit /theme applies themes
+		await Promise.all([
+			captureRunner(pi),
+			initItermConnection(),
+		]);
 	});
 
 	// --- /theme command ---
@@ -411,7 +413,7 @@ export default function (pi: ExtensionAPI) {
 				}
 				const params = getThemeParams(slugifyThemeName(themeArg));
 				writeAndSetPiTheme(ctx, theme.colors, themeArg, params);
-				const sessionId = await getActiveItermSessionId().catch(() => null);
+				const sessionId = await getSessionId().catch(() => null);
 				if (sessionId) await applyThemeToIterm(theme, sessionId).catch(() => null);
 				updateStatus(ctx, themeArg, params);
 				ctx.ui.notify(`Theme "${themeArg}" applied`, "info");

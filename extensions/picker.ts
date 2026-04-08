@@ -17,12 +17,11 @@ import { Container, Key, SelectList, Text, type SelectItem, matchesKey } from "@
 import { debounce } from "perfect-debounce";
 import { EMBEDDED_THEMES } from "./themes.js";
 import {
-	ensureItermConnection,
-	disconnectIterm,
-	getActiveItermSessionId,
+	getSessionId,
 	captureItermSnapshot,
 	applyThemeToIterm,
 	restoreItermSnapshot,
+	isItermReady,
 	type ItermThemeSnapshot,
 } from "./iterm2.js";
 import { writeAndSetPiTheme, buildThemeInstance, slugifyThemeName } from "./pi-theme.js";
@@ -48,15 +47,12 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 
 	const entryByName = new Map(entries.map((e) => [e.name, e]));
 
-	// Open iTerm2 connection once up-front — ~300ms cost absorbed here, not during preview
-	let sessionId: string | null = null;
+	// Connection was established at session_start — just grab the cached session ID
+	// and capture snapshot (~11ms on warm connection)
+	const sessionId = isItermReady() ? await getSessionId() : null;
 	let originalSnapshot: ItermThemeSnapshot | null = null;
-	try {
-		await ensureItermConnection();
-		sessionId = await getActiveItermSessionId();
-		if (sessionId) originalSnapshot = await captureItermSnapshot(sessionId);
-	} catch {
-		// iTerm2 unavailable — Pi-only preview will still work
+	if (sessionId) {
+		try { originalSnapshot = await captureItermSnapshot(sessionId); } catch {}
 	}
 
 	// Build Pi restore instance from current Pi theme colors if possible.
@@ -107,7 +103,6 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		const entry = entryByName.get(themeName);
 		if (!entry) {
 			ctx.ui.notify(`Theme not found: ${themeName}`, "error");
-			disconnectIterm();
 			done(null);
 			return;
 		}
@@ -115,11 +110,9 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// Persist Pi theme — synchronous
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
 
-		// Fire-and-forget iTerm2 confirm + disconnect
+		// Fire-and-forget iTerm2 confirm (connection stays alive for future use)
 		if (sessionId) {
-			applyThemeToIterm(entry, sessionId).catch(() => {}).finally(() => disconnectIterm());
-		} else {
-			disconnectIterm();
+			applyThemeToIterm(entry, sessionId).catch(() => {});
 		}
 
 		done(themeName);
@@ -133,11 +126,9 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// Restore Pi theme — synchronous
 		if (originalPiInstance) ctx.ui.setTheme(originalPiInstance);
 
-		// Fire-and-forget iTerm2 restore + disconnect
+		// Fire-and-forget iTerm2 restore (connection stays alive for future use)
 		if (originalSnapshot) {
-			restoreItermSnapshot(originalSnapshot).catch(() => {}).finally(() => disconnectIterm());
-		} else {
-			disconnectIterm();
+			restoreItermSnapshot(originalSnapshot).catch(() => {});
 		}
 
 		done(null);
