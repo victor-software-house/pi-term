@@ -86,9 +86,11 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		lastAppliedTheme = selectedTheme;
 
 		const slug = slugifyThemeName(entry.name);
+		// Terminal colors first (0ms via /dev/tty) — user sees change instantly
+		applyThemeToItermSync(entry);
+		// Pi theme second (~24ms re-render) — updates Pi's own UI colors
 		const instance = buildThemeInstance(entry.colors, `term-preview-${slug}-${Date.now()}`, getThemeParams(slug), ctx);
 		ctx.ui.setTheme(instance);
-		applyThemeToItermSync(entry);
 	}, getPreviewDebounceMs());
 
 	const closeWithConfirm = (themeName: string, done: (value: string | null) => void): void => {

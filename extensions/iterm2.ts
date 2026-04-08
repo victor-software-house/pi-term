@@ -85,6 +85,17 @@ export function disconnectIterm(): void {}
 
 // --- Escape sequence helpers ---
 
+/** File descriptor for /dev/tty — bypasses Pi's stdout/TUI entirely. */
+let _ttyFd: number | null = null;
+
+function getTtyFd(): number {
+	if (_ttyFd === null) {
+		const { openSync } = require("node:fs") as typeof import("node:fs");
+		_ttyFd = openSync("/dev/tty", "w");
+	}
+	return _ttyFd;
+}
+
 function hexToOsc(hex: string): string {
 	const n = hex.replace("#", "");
 	return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4, 6)}`;
@@ -116,18 +127,17 @@ export function hexToItermColor(hex: string): ItermColor {
  * Completely synchronous — no connection, no async, no overhead.
  */
 export function applyThemeToItermSync(theme: ThemeEntry): void {
-	const out = process.stdout;
-	// OSC 11 = background color
-	out.write(`\x1b]11;rgb:${hexToOsc(theme.colors.background)}\x07`);
-	// OSC 10 = foreground color
-	out.write(`\x1b]10;rgb:${hexToOsc(theme.colors.foreground)}\x07`);
-	// OSC 12 = cursor color
-	if (theme.cursor) out.write(`\x1b]12;rgb:${hexToOsc(theme.cursor)}\x07`);
-	// OSC 4;N = ANSI palette color N
+	const { writeSync } = require("node:fs") as typeof import("node:fs");
+	const fd = getTtyFd();
+	const seqs: string[] = [];
+	seqs.push(`\x1b]11;rgb:${hexToOsc(theme.colors.background)}\x07`);
+	seqs.push(`\x1b]10;rgb:${hexToOsc(theme.colors.foreground)}\x07`);
+	if (theme.cursor) seqs.push(`\x1b]12;rgb:${hexToOsc(theme.cursor)}\x07`);
 	for (let i = 0; i < 16; i++) {
 		const hex = theme.colors.palette[i];
-		if (hex) out.write(`\x1b]4;${i};rgb:${hexToOsc(hex)}\x07`);
+		if (hex) seqs.push(`\x1b]4;${i};rgb:${hexToOsc(hex)}\x07`);
 	}
+	writeSync(fd, seqs.join(""));
 }
 
 /**
@@ -135,15 +145,18 @@ export function applyThemeToItermSync(theme: ThemeEntry): void {
  * Completely synchronous — no connection, no async, no overhead.
  */
 export function restoreSnapshotSync(snapshot: ItermThemeSnapshot): void {
-	const out = process.stdout;
+	const { writeSync } = require("node:fs") as typeof import("node:fs");
+	const fd = getTtyFd();
 	const v = snapshot.values;
-	if (v["Background Color"]) out.write(`\x1b]11;rgb:${hexToOsc(itermColorToHex(v["Background Color"]))}\x07`);
-	if (v["Foreground Color"]) out.write(`\x1b]10;rgb:${hexToOsc(itermColorToHex(v["Foreground Color"]))}\x07`);
-	if (v["Cursor Color"]) out.write(`\x1b]12;rgb:${hexToOsc(itermColorToHex(v["Cursor Color"]))}\x07`);
+	const seqs: string[] = [];
+	if (v["Background Color"]) seqs.push(`\x1b]11;rgb:${hexToOsc(itermColorToHex(v["Background Color"]))}\x07`);
+	if (v["Foreground Color"]) seqs.push(`\x1b]10;rgb:${hexToOsc(itermColorToHex(v["Foreground Color"]))}\x07`);
+	if (v["Cursor Color"]) seqs.push(`\x1b]12;rgb:${hexToOsc(itermColorToHex(v["Cursor Color"]))}\x07`);
 	for (let i = 0; i < 16; i++) {
 		const c = v[`Ansi ${i} Color`];
-		if (c) out.write(`\x1b]4;${i};rgb:${hexToOsc(itermColorToHex(c))}\x07`);
+		if (c) seqs.push(`\x1b]4;${i};rgb:${hexToOsc(itermColorToHex(c))}\x07`);
 	}
+	writeSync(fd, seqs.join(""));
 }
 
 // --- WebSocket snapshot (one-shot, async) ---
