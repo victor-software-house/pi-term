@@ -1,16 +1,13 @@
 /**
- * pi-cmux-theme-picker
+ * pi-term
  *
- * Optionally syncs pi theme with the active cmux terminal theme on session start.
- * Registers /theme command for live theme picking with debounced preview.
- * Registers /theme-settings command for toggling extension settings.
+ * Registers /theme command for live iTerm2 theme picking with debounced preview.
+ * Registers /theme-settings command for configuring theme generation settings.
  */
 
 import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Container, Key, Markdown, type AutocompleteItem, type Component, type OverlayHandle, type SettingItem, SettingsList, Spacer, Text, Box, matchesKey } from "@mariozechner/pi-tui";
-import { getCurrentCmuxThemeName, getCmuxThemeColors, getAvailableCmuxThemes, runCmuxThemeSet } from "./cmux.js";
 import { ensureSemanticHue, hexToRgb, mixColors } from "./colors.js";
-
 import {
 	slugifyThemeName,
 	writeAndSetPiTheme,
@@ -31,11 +28,13 @@ import {
 	clearOverrideParam,
 } from "./settings.js";
 import { DEFAULT_THEME_PARAMS, type SessionContext, type ThemeParams } from "./types.js";
+import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
+import { getActiveItermSessionId, applyThemeToIterm } from "./iterm2.js";
 import { debounce } from "perfect-debounce";
 
-const STATUS_KEY = "cmux-theme";
+const STATUS_KEY = "terminal-theme";
 
-// Cached theme names for autocomplete
+// Cached theme names for autocomplete — populated from embedded catalog
 let cachedThemeNames: string[] = [];
 
 function formatParamValue(value: number): string {
@@ -74,19 +73,6 @@ function updateStatus(ctx: ExtensionContext, themeName?: string, params?: ThemeP
 	let text = statusParts.join(" · ");
 	if (text.length > 60) text = `${text.slice(0, 57)}…`;
 	ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("accent", text));
-}
-
-function syncCurrentCmuxThemeToPi(ctx: SessionContext): void {
-	const currentTheme = getCurrentCmuxThemeName();
-	if (!currentTheme) return;
-	const colors = getCmuxThemeColors(currentTheme);
-	if (!colors) return;
-	const slug = slugifyThemeName(currentTheme);
-	const themeName = slug ? `cmux-sync-${slug}` : "cmux-sync";
-	if (ctx.ui.theme.name === themeName) return;
-	const params = getThemeParams(slug);
-	writeAndSetPiTheme(ctx, colors, currentTheme, params);
-	updateStatus(ctx, currentTheme, params);
 }
 
 function parseCommandThemeName(args: string): string {
@@ -398,17 +384,14 @@ export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle ---
 	pi.on("session_start", async (_event, ctx) => {
 		loadSettings(ctx.cwd);
-		cachedThemeNames = getAvailableCmuxThemes().map((e) => e.name);
+		cachedThemeNames = EMBEDDED_THEMES.map((e) => e.name);
 		await captureRunner(pi);
-
-		if (getSettings().autoSync) {
-			syncCurrentCmuxThemeToPi(ctx);
-		}
+		// Auto-sync disabled in initial iTerm2 migration — only explicit /theme applies themes
 	});
 
 	// --- /theme command ---
 	pi.registerCommand("theme", {
-		description: "Switch cmux + pi themes with live preview",
+		description: "Switch terminal + Pi themes with live preview",
 
 		getArgumentCompletions(prefix: string): AutocompleteItem[] | null {
 			const filtered = cachedThemeNames.filter((n) =>
@@ -421,14 +404,15 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const themeArg = parseCommandThemeName(args);
 			if (themeArg) {
-				const colors = getCmuxThemeColors(themeArg);
-				if (!colors) {
-					ctx.ui.notify(`Unknown cmux theme: ${themeArg}`, "error");
+				const theme = getEmbeddedThemeByName(themeArg);
+				if (!theme) {
+					ctx.ui.notify(`Unknown theme: ${themeArg}`, "error");
 					return;
 				}
 				const params = getThemeParams(slugifyThemeName(themeArg));
-				writeAndSetPiTheme(ctx, colors, themeArg, params);
-				runCmuxThemeSet(themeArg);
+				writeAndSetPiTheme(ctx, theme.colors, themeArg, params);
+				const sessionId = await getActiveItermSessionId().catch(() => null);
+				if (sessionId) await applyThemeToIterm(theme, sessionId).catch(() => null);
 				updateStatus(ctx, themeArg, params);
 				ctx.ui.notify(`Theme "${themeArg}" applied`, "info");
 				return;
@@ -444,12 +428,13 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /theme-settings command ---
 	pi.registerCommand("theme-settings", {
-		description: "Configure cmux theme picker and theme generation settings",
+		description: "Configure theme generation settings",
 
 		handler: async (_args, ctx) => {
-			const cmuxTheme = getCurrentCmuxThemeName();
-			const cmuxColors = cmuxTheme ? getCmuxThemeColors(cmuxTheme) : null;
-			const currentThemeSlug = cmuxTheme ? slugifyThemeName(cmuxTheme) : null;
+			// Use the first theme in the catalog for settings preview color swatches
+			const previewTheme = EMBEDDED_THEMES[0] ?? null;
+			const previewColors = previewTheme?.colors ?? null;
+			const currentThemeSlug = previewTheme ? slugifyThemeName(previewTheme.name) : null;
 			let scope: "global" | string = "global";
 			const scopeLabel = (): string => (scope === "global" ? "global" : scope);
 			const paramsForScope = (): ThemeParams => (scope === "global" ? getThemeParams() : getThemeParams(scope));
@@ -469,14 +454,14 @@ export default function (pi: ExtensionAPI) {
 					"bg",
 				];
 
-				const bg = cmuxColors?.background;
-				const fg = cmuxColors?.foreground;
-				const error = cmuxColors ? ensureSemanticHue(resolvePaletteSourceColor(cmuxColors, p.errorSource), 0, p.errorFallback) : p.errorFallback;
-				const success = cmuxColors ? ensureSemanticHue(resolvePaletteSourceColor(cmuxColors, p.successSource), 120, p.successFallback) : p.successFallback;
-				const accent = cmuxColors ? (resolvePaletteSourceColor(cmuxColors, p.accentSource) || p.accentFallback) : p.accentFallback;
+				const bg = previewColors?.background;
+				const fg = previewColors?.foreground;
+				const error = previewColors ? ensureSemanticHue(resolvePaletteSourceColor(previewColors, p.errorSource), 0, p.errorFallback) : p.errorFallback;
+				const success = previewColors ? ensureSemanticHue(resolvePaletteSourceColor(previewColors, p.successSource), 120, p.successFallback) : p.successFallback;
+				const accent = previewColors ? (resolvePaletteSourceColor(previewColors, p.accentSource) || p.accentFallback) : p.accentFallback;
 				const sourceSwatch = (source: keyof Pick<ThemeParams, "errorSource" | "successSource" | "warningSource" | "linkSource" | "accentSource" | "accentAltSource">, fallback: string): string => {
-					if (!cmuxColors) return swatch(fallback);
-					return swatch(resolvePaletteSourceColor(cmuxColors, p[source]) || fallback);
+					if (!previewColors) return swatch(fallback);
+					return swatch(resolvePaletteSourceColor(previewColors, p[source]) || fallback);
 				};
 				const globalParams = getThemeParams();
 				const isOverridden = <K extends keyof ThemeParams>(key: K): boolean =>
@@ -511,9 +496,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Trailing-only debounce — reads latest in-memory params, never blocks input.
 			const applyPreview = debounce(() => {
-				if (!cmuxColors || !cmuxTheme) return;
-				const slug = slugifyThemeName(cmuxTheme);
-				const instance = buildThemeInstance(cmuxColors, `cmux-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
+				if (!previewColors || !previewTheme) return;
+				const slug = slugifyThemeName(previewTheme.name);
+				const instance = buildThemeInstance(previewColors, `cmux-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
 				ctx.ui.setTheme(instance);
 			}, getPreviewDebounceMs());
 
@@ -576,8 +561,8 @@ export default function (pi: ExtensionAPI) {
 					beforeClose?.();
 					applyPreview.cancel();
 					schedulePersist.flush();
-					if (cmuxColors && cmuxTheme) {
-						writeAndSetPiTheme(ctx, cmuxColors, cmuxTheme, getThemeParams(currentThemeSlug ?? undefined));
+					if (previewColors && previewTheme) {
+						writeAndSetPiTheme(ctx, previewColors, previewTheme.name, getThemeParams(currentThemeSlug ?? undefined));
 					}
 					done(undefined);
 				};

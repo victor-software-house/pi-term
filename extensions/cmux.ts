@@ -8,7 +8,7 @@ import { execFile, execSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { normalizeColor, getLuminance } from "./colors.js";
-import type { CmuxColors, CmuxThemeEntry } from "./types.js";
+import type { TerminalColors, ThemeEntry } from "./types.js";
 
 const CMUX_THEME_DIR = "/Applications/cmux.app/Contents/Resources/ghostty/themes";
 
@@ -37,7 +37,7 @@ export function runCmuxThemeSet(themeName: string): void {
 	});
 }
 
-export function getCmuxThemeColors(themeName: string): CmuxColors | null {
+export function getCmuxThemeColors(themeName: string): TerminalColors | null {
 	try {
 		const themePath = join(CMUX_THEME_DIR, themeName);
 		if (!existsSync(themePath)) return null;
@@ -48,10 +48,10 @@ export function getCmuxThemeColors(themeName: string): CmuxColors | null {
 	}
 }
 
-export function getAvailableCmuxThemes(): CmuxThemeEntry[] {
+export function getAvailableCmuxThemes(): ThemeEntry[] {
 	try {
 		const names = readdirSync(CMUX_THEME_DIR).sort((a, b) => a.localeCompare(b));
-		const entries: CmuxThemeEntry[] = [];
+		const entries: ThemeEntry[] = [];
 		for (const name of names) {
 			const colors = getCmuxThemeColors(name);
 			if (!colors) continue;
@@ -67,8 +67,8 @@ export function getAvailableCmuxThemes(): CmuxThemeEntry[] {
 	}
 }
 
-function parseThemeConfig(output: string): CmuxColors {
-	const colors: CmuxColors = {
+function parseThemeConfig(output: string): TerminalColors {
+	const colors: TerminalColors = {
 		background: "#1e1e1e",
 		foreground: "#d4d4d4",
 		palette: {},

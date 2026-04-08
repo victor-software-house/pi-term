@@ -1,22 +1,32 @@
 /**
- * TUI inline picker — live cmux theme picker.
+ * TUI inline picker — live iTerm2 theme picker.
  *
  * Architecture:
  * - handleInput only updates state (selectedTheme) and calls requestRender.
- *   It NEVER calls setTheme, buildThemeInstance, or runCmuxThemeSet.
- * - A debounced function (lodash.debounce, 50ms trailing) reads the latest
- *   selectedTheme and applies the preview. Completely decoupled from input.
- * - Disk write happens only on confirm (writeAndSetPiTheme).
+ *   It NEVER calls setTheme, buildThemeInstance, or applyThemeToIterm directly.
+ * - A trailing-only debounce reads the latest selectedTheme and applies preview.
+ *   Completely decoupled from input.
+ * - iTerm2 connection is opened once at picker start, closed on confirm/cancel.
+ * - Disk write and Pi theme persist happen only on confirm.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Key, SelectList, Text, type SelectItem, matchesKey } from "@mariozechner/pi-tui";
 import { debounce } from "perfect-debounce";
-import { getCurrentCmuxThemeName, getAvailableCmuxThemes, runCmuxThemeSet } from "./cmux.js";
+import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
+import {
+	ensureItermConnection,
+	disconnectIterm,
+	getActiveItermSessionId,
+	captureItermSnapshot,
+	applyThemeToIterm,
+	restoreItermSnapshot,
+	type ItermThemeSnapshot,
+} from "./iterm2.js";
 import { writeAndSetPiTheme, buildThemeInstance, slugifyThemeName } from "./pi-theme.js";
 import { getThemeParams, getPreviewDebounceMs } from "./settings.js";
-import type { CmuxThemeEntry, FilterMode, CommandContext } from "./types.js";
+import type { ThemeEntry, FilterMode, CommandContext } from "./types.js";
 
 function isPrintableInput(data: string): boolean {
 	return data.length === 1 && data >= " " && data !== "\x7f";
@@ -29,59 +39,110 @@ function nextFilterMode(mode: FilterMode): FilterMode {
 }
 
 export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): Promise<string | null> {
-	const entries = getAvailableCmuxThemes();
+	const entries = EMBEDDED_THEMES;
 	if (entries.length === 0) {
-		ctx.ui.notify("No cmux themes found", "warning");
+		ctx.ui.notify("No themes available", "warning");
 		return null;
 	}
 
 	const entryByName = new Map(entries.map((e) => [e.name, e]));
-	const originalCmuxTheme = getCurrentCmuxThemeName();
 
-	// ctx.ui.theme is a Proxy (always reflects current) — can't capture a snapshot.
-	// Build a restore instance from the current cmux colors + params.
-	const originalCmuxColors = originalCmuxTheme ? entryByName.get(originalCmuxTheme)?.colors : null;
-	const originalInstance = originalCmuxColors && originalCmuxTheme
-		? buildThemeInstance(originalCmuxColors, `cmux-restore-${Date.now()}`, getThemeParams(slugifyThemeName(originalCmuxTheme)), ctx)
+	// Open iTerm2 connection once up-front — ~300ms cost absorbed here, not during preview
+	let sessionId: string | null = null;
+	let originalSnapshot: ItermThemeSnapshot | null = null;
+	try {
+		await ensureItermConnection();
+		sessionId = await getActiveItermSessionId();
+		if (sessionId) originalSnapshot = await captureItermSnapshot(sessionId);
+	} catch {
+		// iTerm2 unavailable — Pi-only preview will still work
+	}
+
+	// Build Pi restore instance from current Pi theme colors if possible
+	// ctx.ui.theme is a Proxy — capture colors from the first embedded theme matching current Pi theme name
+	const currentPiThemeName = ctx.ui.theme.name ?? "";
+	const matchingEntry = entries.find((e) => {
+		const slug = slugifyThemeName(e.name);
+		return currentPiThemeName.includes(slug);
+	});
+	const originalPiInstance = matchingEntry
+		? buildThemeInstance(matchingEntry.colors, `term-restore-${Date.now()}`, getThemeParams(slugifyThemeName(matchingEntry.name)), ctx)
 		: null;
 
 	let filterMode: FilterMode = "all";
 	let searchText = "";
-	let selectedTheme = originalCmuxTheme && entryByName.has(originalCmuxTheme)
-		? originalCmuxTheme
-		: entries[0]!.name;
+	let selectedTheme = entries[0]!.name;
 	let closed = false;
 	let lastAppliedTheme: string | null = null;
 
 	// Trailing-only debounce — NEVER runs during handleInput.
-	// Reads shared selectedTheme state, applies only the latest.
-	const applyPreview = debounce(() => {
+	// Uses Promise.all for both Pi and iTerm2 apply (~260ms each, overlap possible).
+	const applyPreview = debounce(async () => {
 		if (closed || selectedTheme === lastAppliedTheme) return;
 		const entry = entryByName.get(selectedTheme);
 		if (!entry) return;
 		lastAppliedTheme = selectedTheme;
-		const instance = buildThemeInstance(entry.colors, `cmux-preview-${selectedTheme}-${Date.now()}`, getThemeParams(slugifyThemeName(selectedTheme)), ctx);
+
+		const slug = slugifyThemeName(entry.name);
+		const instance = buildThemeInstance(entry.colors, `term-preview-${slug}-${Date.now()}`, getThemeParams(slug), ctx);
 		ctx.ui.setTheme(instance);
-		runCmuxThemeSet(selectedTheme);
+
+		if (sessionId) {
+			try {
+				await applyThemeToIterm(entry, sessionId);
+			} catch {
+				// Degrade gracefully — Pi preview still works
+			}
+		}
 	}, getPreviewDebounceMs());
 
-	const closeWithConfirm = (themeName: string, done: (value: string | null) => void): void => {
+	const closeWithConfirm = async (themeName: string, done: (value: string | null) => void): Promise<void> => {
 		if (closed) return;
 		closed = true;
 		applyPreview.cancel();
+
 		const entry = entryByName.get(themeName);
-		if (!entry) { ctx.ui.notify(`Theme not found: ${themeName}`, "error"); done(null); return; }
+		if (!entry) {
+			ctx.ui.notify(`Theme not found: ${themeName}`, "error");
+			disconnectIterm();
+			done(null);
+			return;
+		}
+
+		// Persist Pi theme from embedded colors
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
-		runCmuxThemeSet(themeName);
+
+		// Ensure iTerm2 reflects confirmed theme (may already be applied from preview)
+		if (sessionId) {
+			try {
+				await applyThemeToIterm(entry, sessionId);
+			} catch {
+				// Non-fatal — Pi theme is already written
+			}
+		}
+
+		disconnectIterm();
 		done(themeName);
 	};
 
-	const closeWithCancel = (done: (value: string | null) => void): void => {
+	const closeWithCancel = async (done: (value: string | null) => void): Promise<void> => {
 		if (closed) return;
 		closed = true;
 		applyPreview.cancel();
-		if (originalInstance) ctx.ui.setTheme(originalInstance);
-		if (originalCmuxTheme) runCmuxThemeSet(originalCmuxTheme);
+
+		// Restore Pi theme
+		if (originalPiInstance) ctx.ui.setTheme(originalPiInstance);
+
+		// Restore iTerm2 terminal colors
+		if (originalSnapshot) {
+			try {
+				await restoreItermSnapshot(originalSnapshot);
+			} catch {
+				// Best-effort restore
+			}
+		}
+
+		disconnectIterm();
 		done(null);
 	};
 
@@ -90,7 +151,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		const container = new Container();
 		let selectList: SelectList | null = null;
 
-		const getVisibleEntries = (): CmuxThemeEntry[] => {
+		const getVisibleEntries = (): ThemeEntry[] => {
 			const byMode = entries.filter((entry) => {
 				if (filterMode === "all") return true;
 				if (filterMode === "dark") return entry.isDark;
@@ -101,18 +162,12 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 			return byMode.filter((entry) => entry.name.toLowerCase().includes(needle));
 		};
 
-		const buildSelectItems = (visibleEntries: CmuxThemeEntry[]): SelectItem[] => {
-			return visibleEntries.map((entry) => {
-				const tags: string[] = [];
-				if (entry.name === originalCmuxTheme) tags.push("current");
-				tags.push(entry.isDark ? "dark" : "light");
-				return {
-					value: entry.name,
-					label: entry.name,
-					description: tags.join(" \u00B7 "),
-				};
-			});
-		};
+		const buildSelectItems = (visibleEntries: ThemeEntry[]): SelectItem[] =>
+			visibleEntries.map((entry) => ({
+				value: entry.name,
+				label: entry.name,
+				description: entry.isDark ? "dark" : "light",
+			}));
 
 		const rebuild = (): void => {
 			const theme = t();
@@ -126,9 +181,9 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 			container.clear();
 			container.addChild(new DynamicBorder((s: string) => t().fg("accent", s)));
 			container.addChild(new Text(
-				theme.fg("accent", theme.bold(" cmux Theme Picker")) +
+				theme.fg("accent", theme.bold(" Theme Picker")) +
 				"  " +
-				theme.fg("dim", `${filterMode} \u00B7 ${searchText || "\u2014"}`),
+				theme.fg("dim", `${filterMode} · ${searchText || "—"}`),
 			));
 
 			selectList = new SelectList(items, 14, {
@@ -147,12 +202,12 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 				selectedTheme = item.value;
 				applyPreview(); // debounced — won't run inline
 			};
-			selectList.onSelect = (item) => closeWithConfirm(item.value, done);
-			selectList.onCancel = () => closeWithCancel(done);
+			selectList.onSelect = (item) => { void closeWithConfirm(item.value, done); };
+			selectList.onCancel = () => { void closeWithCancel(done); };
 
 			container.addChild(selectList);
 			container.addChild(new Text(
-				theme.fg("dim", " type to search \u00B7 backspace delete \u00B7 tab all/dark/light \u00B7 \u2191\u2193 navigate \u00B7 enter apply \u00B7 esc cancel"),
+				theme.fg("dim", " type to search · backspace delete · tab all/dark/light · ↑↓ navigate · enter apply · esc cancel"),
 			));
 			container.addChild(new DynamicBorder((s: string) => t().fg("accent", s)));
 		};
@@ -184,8 +239,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 					tui.requestRender();
 					return;
 				}
-				// SelectList handles arrow keys, enter, esc.
-				// onSelectionChange updates selectedTheme + schedules debounced preview.
+				// SelectList handles arrow keys, enter, esc
 				selectList?.handleInput(data);
 				tui.requestRender();
 			},

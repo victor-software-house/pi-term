@@ -1,7 +1,7 @@
 /**
- * Pi theme generation and file management.
+ * Pi theme generation and file management for pi-term.
  *
- * Converts cmux palette colors into a full Pi theme JSON, writes permanent
+ * Converts a terminal palette into a full Pi theme JSON, writes permanent
  * theme files, and builds in-memory Theme instances for live preview.
  */
 
@@ -16,7 +16,7 @@ import {
 	ensureSemanticHue,
 	pickReadableLink,
 } from "./colors.js";
-import type { CmuxColors, PaletteSource, SessionContext, ThemeParams } from "./types.js";
+import type { TerminalColors, PaletteSource, SessionContext, ThemeParams } from "./types.js";
 
 export const PI_THEMES_DIR = join(homedir(), ".pi", "agent", "themes");
 export function slugifyThemeName(name: string): string {
@@ -33,7 +33,7 @@ export function ensureThemesDir(): void {
 	}
 }
 
-function computeThemeHash(colors: CmuxColors): string {
+function computeThemeHash(colors: TerminalColors): string {
 	const parts: string[] = [];
 	parts.push(`bg=${colors.background}`);
 	parts.push(`fg=${colors.foreground}`);
@@ -42,7 +42,7 @@ function computeThemeHash(colors: CmuxColors): string {
 	return createHash("sha1").update(signature).digest("hex").slice(0, 8);
 }
 
-export function resolvePaletteSourceColor(colors: CmuxColors, source: PaletteSource): string | undefined {
+export function resolvePaletteSourceColor(colors: TerminalColors, source: PaletteSource): string | undefined {
 	if (source === "fg") return colors.foreground;
 	if (source === "bg") return colors.background;
 	const match = source.match(/^palette\[(\d{1,2})\]$/);
@@ -57,16 +57,22 @@ function cleanupOldSyncThemes(keepFiles: string[]): void {
 	try {
 		for (const file of readdirSync(PI_THEMES_DIR)) {
 			if (keep.has(file)) continue;
-			// Legacy name from the old extension
+			// Remove legacy artifacts from old package names
 			if (file === "ghostty-sync.json") {
 				unlinkSync(join(PI_THEMES_DIR, file));
 				continue;
 			}
 			if (file.startsWith("ghostty-sync-") && file.endsWith(".json")) {
 				unlinkSync(join(PI_THEMES_DIR, file));
+				continue;
 			}
 			if (file.startsWith("cmux-sync-") && file.endsWith(".json")) {
 				unlinkSync(join(PI_THEMES_DIR, file));
+				continue;
+			}
+			if (file.startsWith("term-sync-") && file.endsWith(".json")) {
+				unlinkSync(join(PI_THEMES_DIR, file));
+				continue;
 			}
 		}
 	} catch {
@@ -74,7 +80,7 @@ function cleanupOldSyncThemes(keepFiles: string[]): void {
 	}
 }
 
-/** All resolved theme colors computed from cmux palette + params. */
+/** All resolved theme colors computed from terminal palette + params. */
 export interface ResolvedColors {
 	bg: string; fg: string;
 	error: string; success: string; warning: string; link: string;
@@ -85,8 +91,8 @@ export interface ResolvedColors {
 	customMsgBg: string;
 }
 
-/** Compute all derived theme colors from cmux colors + params. */
-export function resolveThemeColors(colors: CmuxColors, p: ThemeParams): ResolvedColors {
+/** Compute all derived theme colors from terminal colors + params. */
+export function resolveThemeColors(colors: TerminalColors, p: ThemeParams): ResolvedColors {
 	const bg = colors.background;
 	const fg = colors.foreground;
 	const isDark = getLuminance(bg) < 0.5;
@@ -119,7 +125,7 @@ export function resolveThemeColors(colors: CmuxColors, p: ThemeParams): Resolved
 	};
 }
 
-export function generatePiTheme(colors: CmuxColors, themeName: string, p: ThemeParams): object {
+export function generatePiTheme(colors: TerminalColors, themeName: string, p: ThemeParams): object {
 	const c = resolveThemeColors(colors, p);
 
 	return {
@@ -198,11 +204,11 @@ export function generatePiTheme(colors: CmuxColors, themeName: string, p: ThemeP
  * Write permanent theme, clean up old sync files, apply via setTheme.
  * Only call on final confirm — not during live preview (cleanup is expensive).
  */
-export function writeAndSetPiTheme(ctx: SessionContext, colors: CmuxColors, sourceThemeName: string, p: ThemeParams): string {
+export function writeAndSetPiTheme(ctx: SessionContext, colors: TerminalColors, sourceThemeName: string, p: ThemeParams): string {
 	ensureThemesDir();
 	const hash = computeThemeHash(colors);
 	const slug = slugifyThemeName(sourceThemeName);
-	const themeName = slug ? `cmux-sync-${slug}` : `cmux-sync-${hash}`;
+	const themeName = slug ? `term-sync-${slug}` : `term-sync-${hash}`;
 	const themeFile = `${themeName}.json`;
 	const themePath = join(PI_THEMES_DIR, themeFile);
 
@@ -232,14 +238,14 @@ const BG_COLOR_KEYS = new Set([
 ]);
 
 /**
- * Build a Theme instance entirely in memory from CmuxColors + ThemeParams.
+ * Build a Theme instance entirely in memory from TerminalColors + ThemeParams.
  * No file I/O — passes directly to ctx.ui.setTheme(instance).
  *
  * Uses ctx.ui.theme.constructor (not an import) to get the exact Theme class
  * identity that Pi's internal setTheme instanceof check requires.
  */
 export function buildThemeInstance(
-	colors: CmuxColors,
+	colors: TerminalColors,
 	themeName: string,
 	p: ThemeParams,
 	ctx: SessionContext,
