@@ -28,6 +28,10 @@ let _bridgeRl: ReadlineInterface | null = null;
 let _ready = false;
 let _pendingReads: Array<(data: any) => void> = [];
 
+// Kill bridge when Pi exits
+process.on("exit", () => { if (_bridge && !_bridge.killed) _bridge.kill(); });
+process.on("SIGTERM", () => { if (_bridge && !_bridge.killed) _bridge.kill(); process.exit(0); });
+
 function bridgePath(): string {
 	return join(__dirname, "iterm2-bridge.py");
 }
