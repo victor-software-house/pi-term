@@ -120,32 +120,35 @@ async def main():
 
         elif cmd == "apply":
             # Session-local preview — doesn't persist to profile
+            # Fire-and-forget: only respond if explicitly requested
             try:
                 session = get_session()
                 lwop = build_lwop(msg["colors"])
                 await session.async_set_profile_properties(lwop)
-                respond({"ok": True})
+                if msg.get("reply"):
+                    respond({"ok": True})
             except Exception as e:
-                respond({"error": str(e)})
+                if msg.get("reply"):
+                    respond({"error": str(e)})
 
         elif cmd == "persist":
-            # Batch write to the actual profile via guid_list, PLUS
-            # apply session-local so the current session reflects it too.
+            # Batch write to the actual profile via guid_list.
+            # Fire-and-forget: only respond if explicitly requested.
             try:
                 if not profile_guid:
-                    respond({"error": "no profile GUID cached"})
+                    if msg.get("reply"):
+                        respond({"error": "no profile GUID cached"})
                     continue
                 lwop = build_lwop(msg["colors"])
                 assignments = list(lwop.values.items())
                 resp = await iterm2.rpc.async_set_profile_properties_json(
                     conn, None, assignments, guids=[profile_guid])
                 status = resp.set_profile_property_response.status
-                # Also apply session-local for immediate effect
-                session = get_session()
-                await session.async_set_profile_properties(lwop)
-                respond({"ok": status == 0, "status": status})
+                if msg.get("reply"):
+                    respond({"ok": status == 0, "status": status})
             except Exception as e:
-                respond({"error": str(e)})
+                if msg.get("reply"):
+                    respond({"error": str(e)})
 
         elif cmd == "snapshot":
             try:
@@ -167,6 +170,7 @@ async def main():
                 respond({"error": str(e)})
 
         elif cmd == "restore":
+            # Fire-and-forget: only respond if explicitly requested
             try:
                 session = get_session()
                 snap = msg["snapshot"]
@@ -174,9 +178,11 @@ async def main():
                 for key, rgb in snap.items():
                     lwop._color_set(key, iterm2.Color(rgb["r"], rgb["g"], rgb["b"]))
                 await session.async_set_profile_properties(lwop)
-                respond({"ok": True})
+                if msg.get("reply"):
+                    respond({"ok": True})
             except Exception as e:
-                respond({"error": str(e)})
+                if msg.get("reply"):
+                    respond({"error": str(e)})
 
         else:
             respond({"error": f"unknown cmd: {cmd}"})
