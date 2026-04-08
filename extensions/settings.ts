@@ -26,7 +26,7 @@ export interface Settings {
 
 const DEFAULTS: Settings = {
 	themeParams: { ...DEFAULT_THEME_PARAMS },
-	previewDebounceMs: 200,
+	previewDebounceMs: 50,
 	themeOverrides: {},
 };
 

@@ -19,8 +19,8 @@ import { EMBEDDED_THEMES } from "./themes.js";
 import {
 	getSessionId,
 	captureItermSnapshot,
-	applyThemeToIterm,
-	restoreItermSnapshot,
+	applyThemeToItermSync,
+	restoreSnapshotSync,
 	isItermReady,
 	type ItermThemeSnapshot,
 } from "./iterm2.js";
@@ -88,11 +88,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		const slug = slugifyThemeName(entry.name);
 		const instance = buildThemeInstance(entry.colors, `term-preview-${slug}-${Date.now()}`, getThemeParams(slug), ctx);
 		ctx.ui.setTheme(instance);
-
-		// Fire-and-forget — never block the debounce callback
-		if (sessionId) {
-			applyThemeToIterm(entry, sessionId).catch(() => {});
-		}
+		applyThemeToItermSync(entry);
 	}, getPreviewDebounceMs());
 
 	const closeWithConfirm = (themeName: string, done: (value: string | null) => void): void => {
@@ -110,10 +106,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// Persist Pi theme — synchronous
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
 
-		// Fire-and-forget iTerm2 confirm (connection stays alive for future use)
-		if (sessionId) {
-			applyThemeToIterm(entry, sessionId).catch(() => {});
-		}
+		applyThemeToItermSync(entry);
 
 		done(themeName);
 	};
@@ -126,10 +119,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// Restore Pi theme — synchronous
 		if (originalPiInstance) ctx.ui.setTheme(originalPiInstance);
 
-		// Fire-and-forget iTerm2 restore (connection stays alive for future use)
-		if (originalSnapshot) {
-			restoreItermSnapshot(originalSnapshot).catch(() => {});
-		}
+		if (originalSnapshot) restoreSnapshotSync(originalSnapshot);
 
 		done(null);
 	};
