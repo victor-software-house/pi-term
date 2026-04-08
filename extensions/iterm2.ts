@@ -1,116 +1,115 @@
 /**
  * iTerm2 live theme adapter for pi-term.
  *
- * Theme APPLY uses terminal escape sequences (OSC 10/11/12/4) — synchronous,
- * zero-overhead, no connection needed. Just process.stdout.write().
+ * Uses a persistent Python bridge process that communicates with iTerm2's
+ * batched protobuf API. All 22 color properties are set in a single message
+ * (~14ms per apply with 200ms debounce gaps).
  *
- * Theme SNAPSHOT (for cancel/restore) uses @shadr/iterm2-ts WebSocket to read
- * current profile properties. This is a one-shot operation at picker open.
+ * The bridge is started once at session_start (~150ms). Theme applies are
+ * fire-and-forget writes to the bridge's stdin — never blocking the caller.
  *
- * Theme RESTORE writes the snapshot values back via escape sequences.
+ * Snapshot/restore for cancel goes through the same bridge.
  */
 
-import type { ITerm2 } from "@shadr/iterm2-ts";
-import { connect } from "@shadr/iterm2-ts";
+import { spawn, type ChildProcess } from "node:child_process";
+import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import { join } from "node:path";
 import type { ThemeEntry } from "./types.js";
 
-/** iTerm2 color property keys for snapshot capture. */
-const COLOR_KEYS = [
-	"Background Color",
-	"Foreground Color",
-	"Cursor Color",
-	"Cursor Text Color",
-	"Selection Color",
-	"Selected Text Color",
-	...Array.from({ length: 16 }, (_, i) => `Ansi ${i} Color`),
-] as const;
-
-export type ItermColorKey = (typeof COLOR_KEYS)[number];
-
-/** iTerm2 JSON color object format (0-1 float components). */
-export interface ItermColor {
-	"Red Component": number;
-	"Green Component": number;
-	"Blue Component": number;
-	"Alpha Component": number;
-	"Color Space": string;
-}
-
-/** Captured snapshot of all managed color properties for one session. */
+/** RGB snapshot of all managed color properties. */
 export interface ItermThemeSnapshot {
-	sessionId: string;
-	values: Record<string, ItermColor>;
+	[key: string]: { r: number; g: number; b: number };
 }
 
-// --- Session ID cache ---
+// --- Bridge process ---
 
-let _cachedSessionId: string | null = null;
+let _bridge: ChildProcess | null = null;
+let _bridgeRl: ReadlineInterface | null = null;
+let _ready = false;
+let _pendingReads: Array<(data: any) => void> = [];
+
+function bridgePath(): string {
+	return join(__dirname, "iterm2-bridge.py");
+}
+
+function readBridgeLine(): Promise<any> {
+	return new Promise((resolve) => {
+		_pendingReads.push(resolve);
+	});
+}
+
+function sendBridgeCommand(cmd: Record<string, unknown>): void {
+	if (!_bridge?.stdin?.writable) return;
+	_bridge.stdin.write(JSON.stringify(cmd) + "\n");
+}
 
 /**
- * Discover and cache the active session ID.
- * Call once at session_start.
+ * Start the bridge process. Call once at session_start.
+ * ~150ms startup cost absorbed here — not during picker use.
  */
 export async function initItermConnection(): Promise<void> {
+	if (_bridge && !_bridge.killed) return;
 	try {
-		const iterm = await connect({ advisoryName: "pi-term" });
-		const app = await iterm.getApp();
-		_cachedSessionId = app.windows[0]?.tabs[0]?.sessions[0]?.id ?? null;
-		iterm.disconnect();
+		_bridge = spawn("python3", [bridgePath()], {
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+		_bridgeRl = createInterface({ input: _bridge.stdout! });
+		_bridgeRl.on("line", (line) => {
+			try {
+				const data = JSON.parse(line);
+				const resolve = _pendingReads.shift();
+				if (resolve) resolve(data);
+			} catch {}
+		});
+		_bridge.on("exit", () => {
+			_ready = false;
+			_bridge = null;
+			_bridgeRl = null;
+		});
+
+		// Wait for ready signal
+		const readyMsg = await readBridgeLine();
+		_ready = readyMsg?.ready === true;
 	} catch {
-		_cachedSessionId = null;
+		_ready = false;
+		_bridge = null;
 	}
 }
 
-/** Return cached session ID. */
-export async function getSessionId(): Promise<string | null> {
-	if (_cachedSessionId) return _cachedSessionId;
-	try {
-		const iterm = await connect({ advisoryName: "pi-term" });
-		const app = await iterm.getApp();
-		_cachedSessionId = app.windows[0]?.tabs[0]?.sessions[0]?.id ?? null;
-		iterm.disconnect();
-		return _cachedSessionId;
-	} catch {
-		return null;
-	}
-}
-
-/** Check if a session ID has been cached. */
+/** Check if the bridge is alive and ready. */
 export function isItermReady(): boolean {
-	return _cachedSessionId !== null;
+	return _ready && _bridge !== null && !_bridge.killed;
 }
 
-/** No-op — connections are per-operation. */
-export function disconnectIterm(): void {}
-
-// --- Escape sequence helpers ---
-
-/** File descriptor for /dev/tty — bypasses Pi's stdout/TUI entirely. */
-let _ttyFd: number | null = null;
-
-function getTtyFd(): number {
-	if (_ttyFd === null) {
-		const { openSync } = require("node:fs") as typeof import("node:fs");
-		_ttyFd = openSync("/dev/tty", "w");
+export function disconnectIterm(): void {
+	if (_bridge && !_bridge.killed) {
+		sendBridgeCommand({ cmd: "quit" });
+		_bridge.kill();
 	}
-	return _ttyFd;
+	_bridge = null;
+	_bridgeRl = null;
+	_ready = false;
 }
 
-function hexToOsc(hex: string): string {
+// --- Helpers ---
+
+function themeToColorMap(theme: ThemeEntry): Record<string, string> {
+	const m: Record<string, string> = {};
+	m["Background Color"] = theme.colors.background.replace("#", "");
+	m["Foreground Color"] = theme.colors.foreground.replace("#", "");
+	if (theme.cursor) m["Cursor Color"] = theme.cursor.replace("#", "");
+	if (theme.cursorText) m["Cursor Text Color"] = theme.cursorText.replace("#", "");
+	if (theme.selectionBackground) m["Selection Color"] = theme.selectionBackground.replace("#", "");
+	if (theme.selectionForeground) m["Selected Text Color"] = theme.selectionForeground.replace("#", "");
+	for (let i = 0; i < 16; i++) {
+		const hex = theme.colors.palette[i];
+		if (hex) m[`Ansi ${i} Color`] = hex.replace("#", "");
+	}
+	return m;
+}
+
+export function hexToItermColor(hex: string): { "Red Component": number; "Green Component": number; "Blue Component": number; "Alpha Component": number; "Color Space": string } {
 	const n = hex.replace("#", "");
-	return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4, 6)}`;
-}
-
-function itermColorToHex(c: ItermColor): string {
-	const r = Math.round(c["Red Component"] * 255).toString(16).padStart(2, "0");
-	const g = Math.round(c["Green Component"] * 255).toString(16).padStart(2, "0");
-	const b = Math.round(c["Blue Component"] * 255).toString(16).padStart(2, "0");
-	return `#${r}${g}${b}`;
-}
-
-export function hexToItermColor(hex: string): ItermColor {
-	const n = hex.replace("#", "");
-	if (n.length !== 6) throw new Error(`Invalid hex color: ${hex}`);
 	return {
 		"Red Component": parseInt(n.slice(0, 2), 16) / 255,
 		"Green Component": parseInt(n.slice(2, 4), 16) / 255,
@@ -120,68 +119,45 @@ export function hexToItermColor(hex: string): ItermColor {
 	};
 }
 
-// --- Escape sequence apply (synchronous, 0ms) ---
+// --- Public API ---
 
 /**
- * Apply a theme to iTerm2 via escape sequences.
- * Completely synchronous — no connection, no async, no overhead.
+ * Apply a theme — fire-and-forget. Writes to bridge stdin without awaiting response.
+ * ~14ms on the bridge side (batched protobuf), 0ms from the caller's perspective.
  */
 export function applyThemeToItermSync(theme: ThemeEntry): void {
-	const { writeSync } = require("node:fs") as typeof import("node:fs");
-	const fd = getTtyFd();
-	const seqs: string[] = [];
-	seqs.push(`\x1b]11;rgb:${hexToOsc(theme.colors.background)}\x07`);
-	seqs.push(`\x1b]10;rgb:${hexToOsc(theme.colors.foreground)}\x07`);
-	if (theme.cursor) seqs.push(`\x1b]12;rgb:${hexToOsc(theme.cursor)}\x07`);
-	for (let i = 0; i < 16; i++) {
-		const hex = theme.colors.palette[i];
-		if (hex) seqs.push(`\x1b]4;${i};rgb:${hexToOsc(hex)}\x07`);
-	}
-	writeSync(fd, seqs.join(""));
+	if (!isItermReady()) return;
+	sendBridgeCommand({ cmd: "apply", colors: themeToColorMap(theme) });
 }
 
 /**
- * Restore colors from a snapshot via escape sequences.
- * Completely synchronous — no connection, no async, no overhead.
+ * Capture current color snapshot. Async — waits for bridge response (~14ms).
+ * Call once at picker open.
+ */
+export async function captureItermSnapshot(): Promise<ItermThemeSnapshot | null> {
+	if (!isItermReady()) return null;
+	sendBridgeCommand({ cmd: "snapshot" });
+	const response = await readBridgeLine();
+	if (response?.ok && response.snapshot) return response.snapshot;
+	return null;
+}
+
+/**
+ * Restore a snapshot — fire-and-forget. 0ms from the caller's perspective.
  */
 export function restoreSnapshotSync(snapshot: ItermThemeSnapshot): void {
-	const { writeSync } = require("node:fs") as typeof import("node:fs");
-	const fd = getTtyFd();
-	const v = snapshot.values;
-	const seqs: string[] = [];
-	if (v["Background Color"]) seqs.push(`\x1b]11;rgb:${hexToOsc(itermColorToHex(v["Background Color"]))}\x07`);
-	if (v["Foreground Color"]) seqs.push(`\x1b]10;rgb:${hexToOsc(itermColorToHex(v["Foreground Color"]))}\x07`);
-	if (v["Cursor Color"]) seqs.push(`\x1b]12;rgb:${hexToOsc(itermColorToHex(v["Cursor Color"]))}\x07`);
-	for (let i = 0; i < 16; i++) {
-		const c = v[`Ansi ${i} Color`];
-		if (c) seqs.push(`\x1b]4;${i};rgb:${hexToOsc(itermColorToHex(c))}\x07`);
-	}
-	writeSync(fd, seqs.join(""));
+	if (!isItermReady()) return;
+	sendBridgeCommand({ cmd: "restore", snapshot });
 }
 
-// --- WebSocket snapshot (one-shot, async) ---
-
-/**
- * Capture current color property values via WebSocket.
- * Fresh connection, parallel read, disconnect. ~90ms one-shot cost at picker open.
- */
-export async function captureItermSnapshot(sessionId: string): Promise<ItermThemeSnapshot> {
-	const iterm = await connect({ advisoryName: "pi-term" });
-	const values: Record<string, ItermColor> = {};
-	await Promise.all(
-		COLOR_KEYS.map(async (key) => {
-			const v = await iterm.getProfileProperty(sessionId, key);
-			if (v && typeof v === "object") values[key] = v as ItermColor;
-		}),
-	);
-	iterm.disconnect();
-	return { sessionId, values };
-}
-
-// --- Legacy async wrappers (kept for API compat, delegate to sync) ---
+// --- Legacy async wrappers ---
 
 export async function applyThemeToIterm(theme: ThemeEntry, _sessionId: string): Promise<void> {
 	applyThemeToItermSync(theme);
+}
+
+export async function getSessionId(): Promise<string | null> {
+	return isItermReady() ? "bridge" : null;
 }
 
 export async function restoreItermSnapshot(snapshot: ItermThemeSnapshot): Promise<void> {

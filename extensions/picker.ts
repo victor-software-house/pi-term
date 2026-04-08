@@ -17,7 +17,6 @@ import { Container, Key, SelectList, Text, type SelectItem, matchesKey } from "@
 import { debounce } from "perfect-debounce";
 import { EMBEDDED_THEMES } from "./themes.js";
 import {
-	getSessionId,
 	captureItermSnapshot,
 	applyThemeToItermSync,
 	restoreSnapshotSync,
@@ -47,12 +46,10 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 
 	const entryByName = new Map(entries.map((e) => [e.name, e]));
 
-	// Connection was established at session_start — just grab the cached session ID
-	// and capture snapshot (~11ms on warm connection)
-	const sessionId = isItermReady() ? await getSessionId() : null;
+	// Bridge was started at session_start — snapshot via batched API (~14ms)
 	let originalSnapshot: ItermThemeSnapshot | null = null;
-	if (sessionId) {
-		try { originalSnapshot = await captureItermSnapshot(sessionId); } catch {}
+	if (isItermReady()) {
+		try { originalSnapshot = await captureItermSnapshot(); } catch {}
 	}
 
 	// Build Pi restore instance from current Pi theme colors if possible.
