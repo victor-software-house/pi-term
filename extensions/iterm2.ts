@@ -56,6 +56,7 @@ export async function initItermConnection(): Promise<void> {
 	try {
 		_bridge = spawn("python3", [bridgePath()], {
 			stdio: ["pipe", "pipe", "pipe"],
+			env: { ...process.env },
 		});
 		_bridgeRl = createInterface({ input: _bridge.stdout! });
 		_bridgeRl.on("line", (line) => {

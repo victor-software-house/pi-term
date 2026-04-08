@@ -3,6 +3,10 @@
 Long-running iTerm2 bridge — reads JSON commands from stdin, applies themes
 via batched protobuf API (one message for all 22 color properties).
 
+The bridge is started with the ITERM_SESSION_ID env var to pin it to the
+correct iTerm2 session (the one running Pi), regardless of which tab is
+currently focused.
+
 Protocol: one JSON object per line on stdin.
   {"cmd":"apply","colors":{"Background Color":"282a36",...}}
     Session-local preview (ephemeral, doesn't affect new tabs).
@@ -21,6 +25,7 @@ Responses: one JSON object per line on stdout.
 """
 import asyncio
 import json
+import os
 import sys
 
 import iterm2
@@ -37,12 +42,32 @@ def build_lwop(colors: dict) -> iterm2.LocalWriteOnlyProfile:
     return lwop
 
 
+async def find_session_by_id(app, session_id: str):
+    """Find a session by its GUID across all windows/tabs."""
+    for window in app.terminal_windows:
+        for tab in window.tabs:
+            for session in tab.sessions:
+                if session.session_id == session_id:
+                    return session
+    return None
+
+
 async def main():
     conn = await iterm2.Connection.async_create()
     app = await iterm2.async_get_app(conn)
 
+    # Pin to the specific session running Pi, not whatever is focused.
+    # ITERM_SESSION_ID format: "w0t0p0:GUID"
+    raw_session_id = os.environ.get("ITERM_SESSION_ID", "")
+    session_guid = raw_session_id.split(":")[-1] if ":" in raw_session_id else ""
+
+    pinned_session = None
+    if session_guid:
+        pinned_session = await find_session_by_id(app, session_guid)
+
     def get_session():
-        return app.current_terminal_window.current_tab.current_session
+        """Return the pinned session, falling back to focused session."""
+        return pinned_session or app.current_terminal_window.current_tab.current_session
 
     def respond(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
@@ -65,7 +90,12 @@ async def main():
     except Exception:
         pass
 
-    respond({"ok": True, "ready": True, "profileGuid": profile_guid})
+    respond({
+        "ok": True,
+        "ready": True,
+        "sessionId": session_guid,
+        "profileGuid": profile_guid,
+    })
 
     loop = asyncio.get_event_loop()
     reader = asyncio.StreamReader()
@@ -99,7 +129,8 @@ async def main():
                 respond({"error": str(e)})
 
         elif cmd == "persist":
-            # Batch write to the actual profile via guid_list
+            # Batch write to the actual profile via guid_list, PLUS
+            # apply session-local so the current session reflects it too.
             try:
                 if not profile_guid:
                     respond({"error": "no profile GUID cached"})
@@ -109,6 +140,9 @@ async def main():
                 resp = await iterm2.rpc.async_set_profile_properties_json(
                     conn, None, assignments, guids=[profile_guid])
                 status = resp.set_profile_property_response.status
+                # Also apply session-local for immediate effect
+                session = get_session()
+                await session.async_set_profile_properties(lwop)
                 respond({"ok": status == 0, "status": status})
             except Exception as e:
                 respond({"error": str(e)})
