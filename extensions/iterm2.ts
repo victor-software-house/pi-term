@@ -1,21 +1,20 @@
 /**
  * iTerm2 live theme adapter for pi-term.
  *
- * Uses @shadr/iterm2-ts (WebSocket/protobuf) to apply and restore terminal
- * color properties on the active iTerm2 session.
+ * Theme APPLY uses terminal escape sequences (OSC 10/11/12/4) — synchronous,
+ * zero-overhead, no connection needed. Just process.stdout.write().
  *
- * Critical: always use Promise.all for multi-property operations.
+ * Theme SNAPSHOT (for cancel/restore) uses @shadr/iterm2-ts WebSocket to read
+ * current profile properties. This is a one-shot operation at picker open.
  *
- * Connection lifecycle: connect ONCE at session_start and keep alive.
- * Session ID is cached — no repeated getApp() calls during preview.
- * Connect cost (~260ms) is paid once on startup, not during picker use.
+ * Theme RESTORE writes the snapshot values back via escape sequences.
  */
 
 import type { ITerm2 } from "@shadr/iterm2-ts";
 import { connect } from "@shadr/iterm2-ts";
 import type { ThemeEntry } from "./types.js";
 
-/** iTerm2 color property keys this adapter manages. */
+/** iTerm2 color property keys for snapshot capture. */
 const COLOR_KEYS = [
 	"Background Color",
 	"Foreground Color",
@@ -40,65 +39,63 @@ export interface ItermColor {
 /** Captured snapshot of all managed color properties for one session. */
 export interface ItermThemeSnapshot {
 	sessionId: string;
-	values: Record<string, unknown>;
+	values: Record<string, ItermColor>;
 }
 
-// --- Connection + session cache ---
+// --- Session ID cache ---
 
-let _conn: ITerm2 | null = null;
 let _cachedSessionId: string | null = null;
 
 /**
- * Connect to iTerm2 and cache the active session ID.
- * Call once at session_start — subsequent calls are cheap (<1ms) if already connected.
+ * Discover and cache the active session ID.
+ * Call once at session_start.
  */
 export async function initItermConnection(): Promise<void> {
 	try {
-		if (!_conn || !_conn.isConnected) {
-			_conn = await connect({ advisoryName: "pi-term" });
-		}
-		const app = await _conn.getApp();
+		const iterm = await connect({ advisoryName: "pi-term" });
+		const app = await iterm.getApp();
 		_cachedSessionId = app.windows[0]?.tabs[0]?.sessions[0]?.id ?? null;
+		iterm.disconnect();
 	} catch {
-		_conn = null;
 		_cachedSessionId = null;
 	}
 }
 
-/** Return the cached connection, reconnecting if needed. */
-async function ensureConnection(): Promise<ITerm2> {
-	if (_conn?.isConnected) return _conn;
-	_conn = await connect({ advisoryName: "pi-term" });
-	return _conn;
-}
-
-/** Return cached session ID. Falls back to getApp() only if cache is empty. */
+/** Return cached session ID. */
 export async function getSessionId(): Promise<string | null> {
 	if (_cachedSessionId) return _cachedSessionId;
 	try {
-		const iterm = await ensureConnection();
+		const iterm = await connect({ advisoryName: "pi-term" });
 		const app = await iterm.getApp();
 		_cachedSessionId = app.windows[0]?.tabs[0]?.sessions[0]?.id ?? null;
+		iterm.disconnect();
 		return _cachedSessionId;
 	} catch {
 		return null;
 	}
 }
 
-/** Check if iTerm2 is connected and session is available. */
+/** Check if a session ID has been cached. */
 export function isItermReady(): boolean {
-	return _conn?.isConnected === true && _cachedSessionId !== null;
+	return _cachedSessionId !== null;
 }
 
-export function disconnectIterm(): void {
-	if (_conn) {
-		_conn.disconnect();
-		_conn = null;
-	}
-	_cachedSessionId = null;
+/** No-op — connections are per-operation. */
+export function disconnectIterm(): void {}
+
+// --- Escape sequence helpers ---
+
+function hexToOsc(hex: string): string {
+	const n = hex.replace("#", "");
+	return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4, 6)}`;
 }
 
-// --- Helpers ---
+function itermColorToHex(c: ItermColor): string {
+	const r = Math.round(c["Red Component"] * 255).toString(16).padStart(2, "0");
+	const g = Math.round(c["Green Component"] * 255).toString(16).padStart(2, "0");
+	const b = Math.round(c["Blue Component"] * 255).toString(16).padStart(2, "0");
+	return `#${r}${g}${b}`;
+}
 
 export function hexToItermColor(hex: string): ItermColor {
 	const n = hex.replace("#", "");
@@ -112,61 +109,68 @@ export function hexToItermColor(hex: string): ItermColor {
 	};
 }
 
-function buildColorAssignments(theme: ThemeEntry): Array<{ key: string; value: ItermColor }> {
-	const { colors, cursor, cursorText, selectionBackground, selectionForeground } = theme;
-	const assignments: Array<{ key: string; value: ItermColor }> = [
-		{ key: "Background Color", value: hexToItermColor(colors.background) },
-		{ key: "Foreground Color", value: hexToItermColor(colors.foreground) },
-	];
-	if (cursor) assignments.push({ key: "Cursor Color", value: hexToItermColor(cursor) });
-	if (cursorText) assignments.push({ key: "Cursor Text Color", value: hexToItermColor(cursorText) });
-	if (selectionBackground) assignments.push({ key: "Selection Color", value: hexToItermColor(selectionBackground) });
-	if (selectionForeground) assignments.push({ key: "Selected Text Color", value: hexToItermColor(selectionForeground) });
-	for (let i = 0; i < 16; i++) {
-		const hex = colors.palette[i];
-		if (hex) assignments.push({ key: `Ansi ${i} Color`, value: hexToItermColor(hex) });
-	}
-	return assignments;
-}
-
-// --- Public API ---
+// --- Escape sequence apply (synchronous, 0ms) ---
 
 /**
- * Capture current color property values for a session.
- * Uses Promise.all — reads all 22 properties in parallel (~11ms on warm connection).
+ * Apply a theme to iTerm2 via escape sequences.
+ * Completely synchronous — no connection, no async, no overhead.
+ */
+export function applyThemeToItermSync(theme: ThemeEntry): void {
+	const out = process.stdout;
+	// OSC 11 = background color
+	out.write(`\x1b]11;rgb:${hexToOsc(theme.colors.background)}\x07`);
+	// OSC 10 = foreground color
+	out.write(`\x1b]10;rgb:${hexToOsc(theme.colors.foreground)}\x07`);
+	// OSC 12 = cursor color
+	if (theme.cursor) out.write(`\x1b]12;rgb:${hexToOsc(theme.cursor)}\x07`);
+	// OSC 4;N = ANSI palette color N
+	for (let i = 0; i < 16; i++) {
+		const hex = theme.colors.palette[i];
+		if (hex) out.write(`\x1b]4;${i};rgb:${hexToOsc(hex)}\x07`);
+	}
+}
+
+/**
+ * Restore colors from a snapshot via escape sequences.
+ * Completely synchronous — no connection, no async, no overhead.
+ */
+export function restoreSnapshotSync(snapshot: ItermThemeSnapshot): void {
+	const out = process.stdout;
+	const v = snapshot.values;
+	if (v["Background Color"]) out.write(`\x1b]11;rgb:${hexToOsc(itermColorToHex(v["Background Color"]))}\x07`);
+	if (v["Foreground Color"]) out.write(`\x1b]10;rgb:${hexToOsc(itermColorToHex(v["Foreground Color"]))}\x07`);
+	if (v["Cursor Color"]) out.write(`\x1b]12;rgb:${hexToOsc(itermColorToHex(v["Cursor Color"]))}\x07`);
+	for (let i = 0; i < 16; i++) {
+		const c = v[`Ansi ${i} Color`];
+		if (c) out.write(`\x1b]4;${i};rgb:${hexToOsc(itermColorToHex(c))}\x07`);
+	}
+}
+
+// --- WebSocket snapshot (one-shot, async) ---
+
+/**
+ * Capture current color property values via WebSocket.
+ * Fresh connection, parallel read, disconnect. ~90ms one-shot cost at picker open.
  */
 export async function captureItermSnapshot(sessionId: string): Promise<ItermThemeSnapshot> {
-	const iterm = await ensureConnection();
-	const values: Record<string, unknown> = {};
+	const iterm = await connect({ advisoryName: "pi-term" });
+	const values: Record<string, ItermColor> = {};
 	await Promise.all(
 		COLOR_KEYS.map(async (key) => {
-			values[key] = await iterm.getProfileProperty(sessionId, key);
+			const v = await iterm.getProfileProperty(sessionId, key);
+			if (v && typeof v === "object") values[key] = v as ItermColor;
 		}),
 	);
+	iterm.disconnect();
 	return { sessionId, values };
 }
 
-/**
- * Apply a theme to an iTerm2 session.
- * Uses Promise.all — applies all properties in parallel (~100ms on warm connection).
- */
-export async function applyThemeToIterm(theme: ThemeEntry, sessionId: string): Promise<void> {
-	const iterm = await ensureConnection();
-	const assignments = buildColorAssignments(theme);
-	await Promise.all(
-		assignments.map(({ key, value }) => iterm.setProfileProperty(sessionId, key, value)),
-	);
+// --- Legacy async wrappers (kept for API compat, delegate to sync) ---
+
+export async function applyThemeToIterm(theme: ThemeEntry, _sessionId: string): Promise<void> {
+	applyThemeToItermSync(theme);
 }
 
-/**
- * Restore a previously captured snapshot.
- * Uses Promise.all — restores all properties in parallel (~100ms on warm connection).
- */
 export async function restoreItermSnapshot(snapshot: ItermThemeSnapshot): Promise<void> {
-	const iterm = await ensureConnection();
-	await Promise.all(
-		Object.entries(snapshot.values).map(([key, value]) =>
-			iterm.setProfileProperty(snapshot.sessionId, key, value),
-		),
-	);
+	restoreSnapshotSync(snapshot);
 }
