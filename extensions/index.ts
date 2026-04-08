@@ -29,7 +29,7 @@ import {
 } from "./settings.js";
 import { DEFAULT_THEME_PARAMS, type SessionContext, type ThemeParams } from "./types.js";
 import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
-import { initItermConnection, persistThemeToProfile } from "./iterm2.js";
+import { initItermConnection, persistThemeToProfile, disconnectIterm } from "./iterm2.js";
 import { debounce } from "perfect-debounce";
 
 const STATUS_KEY = "terminal-theme";
@@ -389,6 +389,10 @@ export default function (pi: ExtensionAPI) {
 			captureRunner(pi),
 			initItermConnection(),
 		]);
+	});
+
+	pi.on("session_shutdown", async () => {
+		disconnectIterm();
 	});
 
 	// --- /theme command ---

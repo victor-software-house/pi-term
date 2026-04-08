@@ -16,7 +16,7 @@ Protocol: one JSON object per line on stdin.
 
 Responses: one JSON object per line on stdout.
   {"ok":true}
-  {"ok":true,"snapshot":{...},"profileGuid":"..."}
+  {"ok":true,"snapshot":{...}}
   {"error":"..."}
 """
 import asyncio
@@ -24,6 +24,7 @@ import json
 import sys
 
 import iterm2
+import iterm2.rpc
 
 
 def build_lwop(colors: dict) -> iterm2.LocalWriteOnlyProfile:
@@ -47,7 +48,24 @@ async def main():
         sys.stdout.write(json.dumps(obj) + "\n")
         sys.stdout.flush()
 
-    respond({"ok": True, "ready": True})
+    # Discover the real profile GUID at startup.
+    # session.async_get_profile() returns a session-local copy with a different GUID.
+    # The real GUID comes from PartialProfile.async_query matching by name.
+    profile_guid = None
+    try:
+        session = get_session()
+        profile = await session.async_get_profile()
+        profile_name = profile.all_properties.get("Name")
+        if profile_name:
+            partials = await iterm2.PartialProfile.async_query(conn)
+            for p in partials:
+                if p.name == profile_name:
+                    profile_guid = p.all_properties.get("Guid")
+                    break
+    except Exception:
+        pass
+
+    respond({"ok": True, "ready": True, "profileGuid": profile_guid})
 
     loop = asyncio.get_event_loop()
     reader = asyncio.StreamReader()
@@ -81,21 +99,17 @@ async def main():
                 respond({"error": str(e)})
 
         elif cmd == "persist":
-            # Write to the actual profile — persists across new tabs/windows
+            # Batch write to the actual profile via guid_list
             try:
-                session = get_session()
-                profile = await session.async_get_profile()
-                guid = profile.all_properties.get("Guid", None)
-                if not guid:
-                    respond({"error": "could not determine profile GUID"})
+                if not profile_guid:
+                    respond({"error": "no profile GUID cached"})
                     continue
-                colors = msg["colors"]
-                for key, hex_val in colors.items():
-                    h = hex_val.lstrip("#")
-                    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-                    color = iterm2.Color(r, g, b)
-                    await profile._async_color_set(key, color)
-                respond({"ok": True})
+                lwop = build_lwop(msg["colors"])
+                assignments = list(lwop.values.items())
+                resp = await iterm2.rpc.async_set_profile_properties_json(
+                    conn, None, assignments, guids=[profile_guid])
+                status = resp.set_profile_property_response.status
+                respond({"ok": status == 0, "status": status})
             except Exception as e:
                 respond({"error": str(e)})
 
@@ -114,8 +128,7 @@ async def main():
                         snap[key] = {"r": c.red, "g": c.green, "b": c.blue}
                     except Exception:
                         pass
-                guid = profile.all_properties.get("Guid", "")
-                respond({"ok": True, "snapshot": snap, "profileGuid": guid})
+                respond({"ok": True, "snapshot": snap})
             except Exception as e:
                 respond({"error": str(e)})
 
