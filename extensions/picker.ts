@@ -5,7 +5,8 @@
  * - handleInput only updates state (selectedTheme) and calls requestRender.
  *   It NEVER calls setTheme, buildThemeInstance, or applyThemeToIterm directly.
  * - A trailing-only debounce reads the latest selectedTheme and applies preview.
- *   Completely decoupled from input.
+ *   Pi theme update is synchronous inside the debounce. iTerm2 apply is
+ *   fire-and-forget — never awaited, never blocks the debounce callback.
  * - iTerm2 connection is opened once at picker start, closed on confirm/cancel.
  * - Disk write and Pi theme persist happen only on confirm.
  */
@@ -14,7 +15,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Container, Key, SelectList, Text, type SelectItem, matchesKey } from "@mariozechner/pi-tui";
 import { debounce } from "perfect-debounce";
-import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
+import { EMBEDDED_THEMES } from "./themes.js";
 import {
 	ensureItermConnection,
 	disconnectIterm,
@@ -58,8 +59,8 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		// iTerm2 unavailable — Pi-only preview will still work
 	}
 
-	// Build Pi restore instance from current Pi theme colors if possible
-	// ctx.ui.theme is a Proxy — capture colors from the first embedded theme matching current Pi theme name
+	// Build Pi restore instance from current Pi theme colors if possible.
+	// ctx.ui.theme is a Proxy — capture colors from the embedded theme matching current Pi theme name.
 	const currentPiThemeName = ctx.ui.theme.name ?? "";
 	const matchingEntry = entries.find((e) => {
 		const slug = slugifyThemeName(e.name);
@@ -69,15 +70,20 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		? buildThemeInstance(matchingEntry.colors, `term-restore-${Date.now()}`, getThemeParams(slugifyThemeName(matchingEntry.name)), ctx)
 		: null;
 
+	// Track the "current" theme name for display tagging
+	const currentThemeName = matchingEntry?.name ?? null;
+
 	let filterMode: FilterMode = "all";
 	let searchText = "";
-	let selectedTheme = entries[0]!.name;
+	let selectedTheme = currentThemeName && entryByName.has(currentThemeName)
+		? currentThemeName
+		: entries[0]!.name;
 	let closed = false;
 	let lastAppliedTheme: string | null = null;
 
 	// Trailing-only debounce — NEVER runs during handleInput.
-	// Uses Promise.all for both Pi and iTerm2 apply (~260ms each, overlap possible).
-	const applyPreview = debounce(async () => {
+	// Pi setTheme is synchronous. iTerm2 apply is fire-and-forget.
+	const applyPreview = debounce(() => {
 		if (closed || selectedTheme === lastAppliedTheme) return;
 		const entry = entryByName.get(selectedTheme);
 		if (!entry) return;
@@ -87,16 +93,13 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		const instance = buildThemeInstance(entry.colors, `term-preview-${slug}-${Date.now()}`, getThemeParams(slug), ctx);
 		ctx.ui.setTheme(instance);
 
+		// Fire-and-forget — never block the debounce callback
 		if (sessionId) {
-			try {
-				await applyThemeToIterm(entry, sessionId);
-			} catch {
-				// Degrade gracefully — Pi preview still works
-			}
+			applyThemeToIterm(entry, sessionId).catch(() => {});
 		}
 	}, getPreviewDebounceMs());
 
-	const closeWithConfirm = async (themeName: string, done: (value: string | null) => void): Promise<void> => {
+	const closeWithConfirm = (themeName: string, done: (value: string | null) => void): void => {
 		if (closed) return;
 		closed = true;
 		applyPreview.cancel();
@@ -109,40 +112,34 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 			return;
 		}
 
-		// Persist Pi theme from embedded colors
+		// Persist Pi theme — synchronous
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
 
-		// Ensure iTerm2 reflects confirmed theme (may already be applied from preview)
+		// Fire-and-forget iTerm2 confirm + disconnect
 		if (sessionId) {
-			try {
-				await applyThemeToIterm(entry, sessionId);
-			} catch {
-				// Non-fatal — Pi theme is already written
-			}
+			applyThemeToIterm(entry, sessionId).catch(() => {}).finally(() => disconnectIterm());
+		} else {
+			disconnectIterm();
 		}
 
-		disconnectIterm();
 		done(themeName);
 	};
 
-	const closeWithCancel = async (done: (value: string | null) => void): Promise<void> => {
+	const closeWithCancel = (done: (value: string | null) => void): void => {
 		if (closed) return;
 		closed = true;
 		applyPreview.cancel();
 
-		// Restore Pi theme
+		// Restore Pi theme — synchronous
 		if (originalPiInstance) ctx.ui.setTheme(originalPiInstance);
 
-		// Restore iTerm2 terminal colors
+		// Fire-and-forget iTerm2 restore + disconnect
 		if (originalSnapshot) {
-			try {
-				await restoreItermSnapshot(originalSnapshot);
-			} catch {
-				// Best-effort restore
-			}
+			restoreItermSnapshot(originalSnapshot).catch(() => {}).finally(() => disconnectIterm());
+		} else {
+			disconnectIterm();
 		}
 
-		disconnectIterm();
 		done(null);
 	};
 
@@ -162,12 +159,18 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 			return byMode.filter((entry) => entry.name.toLowerCase().includes(needle));
 		};
 
-		const buildSelectItems = (visibleEntries: ThemeEntry[]): SelectItem[] =>
-			visibleEntries.map((entry) => ({
-				value: entry.name,
-				label: entry.name,
-				description: entry.isDark ? "dark" : "light",
-			}));
+		const buildSelectItems = (visibleEntries: ThemeEntry[]): SelectItem[] => {
+			return visibleEntries.map((entry) => {
+				const tags: string[] = [];
+				if (entry.name === currentThemeName) tags.push("current");
+				tags.push(entry.isDark ? "dark" : "light");
+				return {
+					value: entry.name,
+					label: entry.name,
+					description: tags.join(" \u00B7 "),
+				};
+			});
+		};
 
 		const rebuild = (): void => {
 			const theme = t();
@@ -183,7 +186,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 			container.addChild(new Text(
 				theme.fg("accent", theme.bold(" Theme Picker")) +
 				"  " +
-				theme.fg("dim", `${filterMode} · ${searchText || "—"}`),
+				theme.fg("dim", `${filterMode} \u00B7 ${searchText || "\u2014"}`),
 			));
 
 			selectList = new SelectList(items, 14, {
@@ -202,12 +205,12 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 				selectedTheme = item.value;
 				applyPreview(); // debounced — won't run inline
 			};
-			selectList.onSelect = (item) => { void closeWithConfirm(item.value, done); };
-			selectList.onCancel = () => { void closeWithCancel(done); };
+			selectList.onSelect = (item) => closeWithConfirm(item.value, done);
+			selectList.onCancel = () => closeWithCancel(done);
 
 			container.addChild(selectList);
 			container.addChild(new Text(
-				theme.fg("dim", " type to search · backspace delete · tab all/dark/light · ↑↓ navigate · enter apply · esc cancel"),
+				theme.fg("dim", " type to search \u00B7 backspace delete \u00B7 tab all/dark/light \u00B7 \u2191\u2193 navigate \u00B7 enter apply \u00B7 esc cancel"),
 			));
 			container.addChild(new DynamicBorder((s: string) => t().fg("accent", s)));
 		};
@@ -239,7 +242,8 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 					tui.requestRender();
 					return;
 				}
-				// SelectList handles arrow keys, enter, esc
+				// SelectList handles arrow keys, enter, esc.
+				// onSelectionChange updates selectedTheme + schedules debounced preview.
 				selectList?.handleInput(data);
 				tui.requestRender();
 			},
