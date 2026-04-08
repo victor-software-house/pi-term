@@ -116,7 +116,7 @@ async function captureRunner(pi: ExtensionAPI): Promise<void> {
 		const post = (method: string, params: Record<string, unknown>): Promise<any> =>
 			new Promise((resolve, reject) => session.post(method, params, (err: Error | null, res: unknown) => err ? reject(err) : resolve(res)));
 
-		const key = `__cmuxTheme_${Date.now()}`;
+		const key = `__termTheme_${Date.now()}`;
 		(globalThis as any)[key] = pi.getAllTools;
 		try {
 			const fn1 = await post("Runtime.evaluate", { expression: `globalThis.${key}` });
@@ -472,7 +472,6 @@ export default function (pi: ExtensionAPI) {
 					isOverridden(key) ? `${base} (global: ${globalParams[key]})` : base;
 
 				return [
-					{ id: "autoSync", label: "Auto-sync on session start", currentValue: settings.autoSync ? "on" : "off", values: ["on", "off"], description: "Sync Pi theme with cmux theme when a session starts" },
 					{ id: "mutedWeight", label: `${overridePrefix("mutedWeight")}${bg && fg ? `${swatch(mixColors(fg, bg, p.mutedWeight))} ` : ""}Muted text weight`, currentValue: p.mutedWeight.toFixed(2), values: weight01, description: overrideDesc("mutedWeight", "fg/bg mix for muted text (higher = more fg)") },
 					{ id: "dimWeight", label: `${overridePrefix("dimWeight")}${bg && fg ? `${swatch(mixColors(fg, bg, p.dimWeight))} ` : ""}Dim text weight`, currentValue: p.dimWeight.toFixed(2), values: weight01, description: overrideDesc("dimWeight", "fg/bg mix for dim text") },
 					{ id: "borderWeight", label: `${overridePrefix("borderWeight")}${bg && fg ? `${swatch(mixColors(fg, bg, p.borderWeight))} ` : ""}Border weight`, currentValue: p.borderWeight.toFixed(2), values: weight01, description: overrideDesc("borderWeight", "fg/bg mix for muted borders") },
@@ -498,7 +497,7 @@ export default function (pi: ExtensionAPI) {
 			const applyPreview = debounce(() => {
 				if (!previewColors || !previewTheme) return;
 				const slug = slugifyThemeName(previewTheme.name);
-				const instance = buildThemeInstance(previewColors, `cmux-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
+				const instance = buildThemeInstance(previewColors, `term-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
 				ctx.ui.setTheme(instance);
 			}, getPreviewDebounceMs());
 
@@ -521,10 +520,6 @@ export default function (pi: ExtensionAPI) {
 			]);
 
 			const handleValueChange = (id: string, newValue: string): void => {
-				if (id === "autoSync") {
-					updateSettings({ autoSync: newValue === "on" });
-					return;
-				}
 				if (id === "previewDebounceMs") {
 					updateSettings({ previewDebounceMs: parseInt(newValue, 10) });
 					return;

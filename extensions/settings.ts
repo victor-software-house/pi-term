@@ -19,14 +19,12 @@ export interface ThemeOverride {
 }
 
 export interface Settings {
-	autoSync: boolean;
 	themeParams: ThemeParams;
 	previewDebounceMs: number;
 	themeOverrides: Record<string, ThemeOverride>;
 }
 
 const DEFAULTS: Settings = {
-	autoSync: false,
 	themeParams: { ...DEFAULT_THEME_PARAMS },
 	previewDebounceMs: 200,
 	themeOverrides: {},
