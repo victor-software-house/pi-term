@@ -2,8 +2,8 @@
  * Extension settings — persisted as JSON on disk.
  *
  * Config files (project overrides global):
- *   ~/.pi/agent/extensions/pi-cmux-theme-picker.json  (global)
- *   <cwd>/.pi/extensions/pi-cmux-theme-picker.json    (project)
+ *   ~/.pi/agent/extensions/pi-term.json  (global)
+ *   <cwd>/.pi/extensions/pi-term.json    (project)
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { join, dirname } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { DEFAULT_THEME_PARAMS, type ThemeParams } from "./types.js";
 
-const CONFIG_FILENAME = "pi-cmux-theme-picker.json";
+const CONFIG_FILENAME = "pi-term.json";
 
 export interface ThemeOverride {
 	enabled: boolean;

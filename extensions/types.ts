@@ -1,19 +1,25 @@
 /**
- * Shared types for pi-cmux-theme-picker.
+ * Shared types for pi-term.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-export interface CmuxColors {
+/** Core terminal palette — background, foreground, and 16-color ANSI palette. */
+export interface TerminalColors {
 	background: string;
 	foreground: string;
 	palette: Record<number, string>;
 }
 
-export interface CmuxThemeEntry {
+/** An embedded theme entry available in the picker. */
+export interface ThemeEntry {
 	name: string;
-	colors: CmuxColors;
+	colors: TerminalColors;
 	isDark: boolean;
+	cursor?: string;
+	cursorText?: string;
+	selectionBackground?: string;
+	selectionForeground?: string;
 }
 
 export type FilterMode = "all" | "dark" | "light";
