@@ -13,8 +13,21 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
+import { openSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { ThemeEntry } from "./types.js";
+
+// --- /dev/tty for instant escape sequences (preview + restore) ---
+
+let _ttyFd: number | null = null;
+function getTtyFd(): number {
+	if (_ttyFd === null) _ttyFd = openSync("/dev/tty", "w");
+	return _ttyFd;
+}
+function hexToOsc(hex: string): string {
+	const n = hex.replace("#", "");
+	return `${n.slice(0, 2)}/${n.slice(2, 4)}/${n.slice(4, 6)}`;
+}
 
 /** RGB snapshot of all managed color properties. */
 export interface ItermThemeSnapshot {
@@ -127,12 +140,20 @@ export function hexToItermColor(hex: string): { "Red Component": number; "Green 
 // --- Public API ---
 
 /**
- * Apply a theme — fire-and-forget. Writes to bridge stdin without awaiting response.
- * ~14ms on the bridge side (batched protobuf), 0ms from the caller's perspective.
+ * Apply a theme via OSC escape sequences to /dev/tty.
+ * Synchronous, ~0.05ms. Bypasses Pi's TUI and the bridge entirely.
  */
 export function applyThemeToItermSync(theme: ThemeEntry): void {
-	if (!isItermReady()) return;
-	sendBridgeCommand({ cmd: "apply", colors: themeToColorMap(theme) });
+	const fd = getTtyFd();
+	const seqs: string[] = [];
+	seqs.push(`\x1b]11;rgb:${hexToOsc(theme.colors.background)}\x07`);
+	seqs.push(`\x1b]10;rgb:${hexToOsc(theme.colors.foreground)}\x07`);
+	if (theme.cursor) seqs.push(`\x1b]12;rgb:${hexToOsc(theme.cursor)}\x07`);
+	for (let i = 0; i < 16; i++) {
+		const hex = theme.colors.palette[i];
+		if (hex) seqs.push(`\x1b]4;${i};rgb:${hexToOsc(hex)}\x07`);
+	}
+	writeSync(fd, seqs.join(""));
 }
 
 /**
@@ -148,11 +169,23 @@ export async function captureItermSnapshot(): Promise<ItermThemeSnapshot | null>
 }
 
 /**
- * Restore a snapshot — fire-and-forget. 0ms from the caller's perspective.
+ * Restore terminal colors from a snapshot via OSC escape sequences.
+ * Synchronous, ~0.05ms.
  */
 export function restoreSnapshotSync(snapshot: ItermThemeSnapshot): void {
-	if (!isItermReady()) return;
-	sendBridgeCommand({ cmd: "restore", snapshot });
+	const fd = getTtyFd();
+	const seqs: string[] = [];
+	const rgb2osc = (c: { r: number; g: number; b: number }) =>
+		`${c.r.toString(16).padStart(2, "0")}/${c.g.toString(16).padStart(2, "0")}/${c.b.toString(16).padStart(2, "0")}`;
+	const v = snapshot;
+	if (v["Background Color"]) seqs.push(`\x1b]11;rgb:${rgb2osc(v["Background Color"])}\x07`);
+	if (v["Foreground Color"]) seqs.push(`\x1b]10;rgb:${rgb2osc(v["Foreground Color"])}\x07`);
+	if (v["Cursor Color"]) seqs.push(`\x1b]12;rgb:${rgb2osc(v["Cursor Color"])}\x07`);
+	for (let i = 0; i < 16; i++) {
+		const c = v[`Ansi ${i} Color`];
+		if (c) seqs.push(`\x1b]4;${i};rgb:${rgb2osc(c)}\x07`);
+	}
+	writeSync(fd, seqs.join(""));
 }
 
 /**
