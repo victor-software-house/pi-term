@@ -1,16 +1,16 @@
 {
-  "name": "pi-cmux-theme-picker",
+  "name": "pi-term",
   "version": "0.3.0",
-  "description": "Live cmux terminal theme picker for Pi with synchronized pi + cmux theme switching and debounced preview.",
+  "description": "Live terminal theme picker for Pi, currently focused on iTerm2 with embedded themes and debounced preview.",
   "license": "MIT",
   "author": "Victor Software House",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/victor-software-house/pi-cmux-theme-picker.git"
+    "url": "git+ssh://git@github.com/victor-software-house/pi-term.git"
   },
-  "homepage": "https://github.com/victor-software-house/pi-cmux-theme-picker#readme",
+  "homepage": "https://github.com/victor-software-house/pi-term#readme",
   "bugs": {
-    "url": "https://github.com/victor-software-house/pi-cmux-theme-picker/issues"
+    "url": "https://github.com/victor-software-house/pi-term/issues"
   },
   "publishConfig": {
     "access": "public",
@@ -20,8 +20,8 @@
     "pi-package",
     "pi-extension",
     "pi-coding-agent",
-    "cmux",
-    "ghostty",
+    "iterm2",
+    "terminal",
     "theme",
     "theme-picker"
   ],
@@ -29,7 +29,7 @@
     "extensions": [
       "./extensions"
     ],
-    "image": "https://raw.githubusercontent.com/victor-software-house/pi-cmux-theme-picker/main/assets/preview.png"
+    "image": "https://raw.githubusercontent.com/victor-software-house/pi-term/main/assets/preview.png"
   },
   "type": "module",
   "files": [
