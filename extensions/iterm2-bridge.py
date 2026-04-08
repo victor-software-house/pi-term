@@ -3,25 +3,17 @@
 Long-running iTerm2 bridge — reads JSON commands from stdin, applies themes
 via batched protobuf API (one message for all 22 color properties).
 
-The bridge is started with the ITERM_SESSION_ID env var to pin it to the
-correct iTerm2 session (the one running Pi), regardless of which tab is
-currently focused.
+Pinned to the iTerm2 session running Pi via ITERM_SESSION_ID env var.
 
 Protocol: one JSON object per line on stdin.
-  {"cmd":"apply","colors":{"Background Color":"282a36",...}}
-    Session-local preview (ephemeral, doesn't affect new tabs).
-  {"cmd":"persist","colors":{"Background Color":"282a36",...}}
-    Writes to the actual profile (persists across new tabs/windows).
-  {"cmd":"snapshot"}
-    Capture current colors. Response: {"ok":true,"snapshot":{...}}
-  {"cmd":"restore","snapshot":{...}}
-    Restore session-local colors from a snapshot.
+  {"cmd":"apply","colors":{...}}      Session-local preview (ephemeral).
+  {"cmd":"persist","colors":{...}}    Write to profile (persists, updates all tabs).
+  {"cmd":"snapshot"}                  Capture current colors.
+  {"cmd":"restore","snapshot":{...}}  Restore session-local from snapshot.
   {"cmd":"quit"}
 
-Responses: one JSON object per line on stdout.
-  {"ok":true}
-  {"ok":true,"snapshot":{...}}
-  {"error":"..."}
+Fire-and-forget commands (apply, persist, restore) do not send responses
+unless {"reply":true} is set. Only snapshot always responds.
 """
 import asyncio
 import json
@@ -30,6 +22,7 @@ import sys
 
 import iterm2
 import iterm2.rpc
+import iterm2.api_pb2
 
 
 def build_lwop(colors: dict) -> iterm2.LocalWriteOnlyProfile:
@@ -56,36 +49,33 @@ async def main():
     conn = await iterm2.Connection.async_create()
     app = await iterm2.async_get_app(conn)
 
-    # Pin to the specific session running Pi, not whatever is focused.
-    # ITERM_SESSION_ID format: "w0t0p0:GUID"
+    # Pin to Pi's session via ITERM_SESSION_ID env var.
     raw_session_id = os.environ.get("ITERM_SESSION_ID", "")
     session_guid = raw_session_id.split(":")[-1] if ":" in raw_session_id else ""
-
-    pinned_session = None
-    if session_guid:
-        pinned_session = await find_session_by_id(app, session_guid)
+    pinned_session = await find_session_by_id(app, session_guid) if session_guid else None
 
     def get_session():
-        """Return the pinned session, falling back to focused session."""
         return pinned_session or app.current_terminal_window.current_tab.current_session
 
     def respond(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
         sys.stdout.flush()
 
-    # Discover the real profile GUID at startup.
-    # session.async_get_profile() returns a session-local copy with a different GUID.
-    # The real GUID comes from PartialProfile.async_query matching by name.
-    profile_guid = None
+    # Discover profile GUID for persistence.
+    # The correct GUID comes from PartialProfile -> async_get_full_profile,
+    # NOT from session.async_get_profile().all_properties["Guid"].
+    profile_guids = None
+    profile_name = None
     try:
         session = get_session()
-        profile = await session.async_get_profile()
-        profile_name = profile.all_properties.get("Name")
+        session_profile = await session.async_get_profile()
+        profile_name = session_profile.all_properties.get("Name")
         if profile_name:
             partials = await iterm2.PartialProfile.async_query(conn)
             for p in partials:
                 if p.name == profile_name:
-                    profile_guid = p.all_properties.get("Guid")
+                    full = await p.async_get_full_profile()
+                    profile_guids = full._guids_for_set()
                     break
     except Exception:
         pass
@@ -94,7 +84,8 @@ async def main():
         "ok": True,
         "ready": True,
         "sessionId": session_guid,
-        "profileGuid": profile_guid,
+        "profileName": profile_name,
+        "hasProfileGuids": profile_guids is not None,
     })
 
     loop = asyncio.get_event_loop()
@@ -113,44 +104,46 @@ async def main():
             continue
 
         cmd = msg.get("cmd")
+        reply = msg.get("reply", False)
 
         if cmd == "quit":
-            respond({"ok": True})
+            if reply:
+                respond({"ok": True})
             break
 
         elif cmd == "apply":
-            # Session-local preview — doesn't persist to profile
-            # Fire-and-forget: only respond if explicitly requested
+            # Session-local preview — ephemeral
             try:
                 session = get_session()
                 lwop = build_lwop(msg["colors"])
                 await session.async_set_profile_properties(lwop)
-                if msg.get("reply"):
+                if reply:
                     respond({"ok": True})
             except Exception as e:
-                if msg.get("reply"):
+                if reply:
                     respond({"error": str(e)})
 
         elif cmd == "persist":
-            # Batch write to the actual profile via guid_list.
-            # Fire-and-forget: only respond if explicitly requested.
+            # Batch write to the actual profile — persists, updates all tabs
             try:
-                if not profile_guid:
-                    if msg.get("reply"):
-                        respond({"error": "no profile GUID cached"})
+                if not profile_guids:
+                    if reply:
+                        respond({"error": "no profile GUID discovered"})
                     continue
                 lwop = build_lwop(msg["colors"])
                 assignments = list(lwop.values.items())
                 resp = await iterm2.rpc.async_set_profile_properties_json(
-                    conn, None, assignments, guids=[profile_guid])
+                    conn, None, assignments, guids=profile_guids)
                 status = resp.set_profile_property_response.status
-                if msg.get("reply"):
-                    respond({"ok": status == 0, "status": status})
+                ok = status == iterm2.api_pb2.SetProfilePropertyResponse.Status.Value("OK")
+                if reply:
+                    respond({"ok": ok, "status": status})
             except Exception as e:
-                if msg.get("reply"):
+                if reply:
                     respond({"error": str(e)})
 
         elif cmd == "snapshot":
+            # Always responds
             try:
                 session = get_session()
                 profile = await session.async_get_profile()
@@ -170,7 +163,7 @@ async def main():
                 respond({"error": str(e)})
 
         elif cmd == "restore":
-            # Fire-and-forget: only respond if explicitly requested
+            # Session-local restore from snapshot
             try:
                 session = get_session()
                 snap = msg["snapshot"]
@@ -178,10 +171,10 @@ async def main():
                 for key, rgb in snap.items():
                     lwop._color_set(key, iterm2.Color(rgb["r"], rgb["g"], rgb["b"]))
                 await session.async_set_profile_properties(lwop)
-                if msg.get("reply"):
+                if reply:
                     respond({"ok": True})
             except Exception as e:
-                if msg.get("reply"):
+                if reply:
                     respond({"error": str(e)})
 
         else:
