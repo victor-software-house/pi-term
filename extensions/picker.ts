@@ -24,7 +24,7 @@ import {
 	type ItermThemeSnapshot,
 } from "./iterm2.js";
 import { writeAndSetPiTheme, buildThemeInstance, slugifyThemeName } from "./pi-theme.js";
-import { getThemeParams, getPreviewDebounceMs, setCurrentTheme } from "./settings.js";
+import { getThemeParams, getPreviewDebounceMs, setCurrentTheme, getCurrentTheme } from "./settings.js";
 import type { ThemeEntry, FilterMode, CommandContext } from "./types.js";
 
 function isPrintableInput(data: string): boolean {
@@ -52,25 +52,19 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		try { originalSnapshot = await captureItermSnapshot(); } catch {}
 	}
 
-	// Build Pi restore instance from current Pi theme colors if possible.
-	// ctx.ui.theme is a Proxy — capture colors from the embedded theme matching current Pi theme name.
-	const currentPiThemeName = ctx.ui.theme.name ?? "";
-	const matchingEntry = entries.find((e) => {
-		const slug = slugifyThemeName(e.name);
-		return currentPiThemeName.includes(slug);
-	});
-	const originalPiInstance = matchingEntry
-		? buildThemeInstance(matchingEntry.colors, `term-restore-${Date.now()}`, getThemeParams(slugifyThemeName(matchingEntry.name)), ctx)
-		: null;
+	// Use stored current theme as the authoritative source — same pattern as cmux picker
+	// using getCurrentCmuxThemeName(). Avoids unreliable inference from ctx.ui.theme.name.
+	const storedThemeName = getCurrentTheme();
+	const currentThemeName = storedThemeName && entryByName.has(storedThemeName) ? storedThemeName : null;
+	const currentEntry = currentThemeName ? (entryByName.get(currentThemeName) ?? null) : null;
 
-	// Track the "current" theme name for display tagging
-	const currentThemeName = matchingEntry?.name ?? null;
+	const originalPiInstance = currentEntry && currentThemeName
+		? buildThemeInstance(currentEntry.colors, `term-restore-${Date.now()}`, getThemeParams(slugifyThemeName(currentThemeName)), ctx)
+		: null;
 
 	let filterMode: FilterMode = "all";
 	let searchText = "";
-	let selectedTheme = currentThemeName && entryByName.has(currentThemeName)
-		? currentThemeName
-		: entries[0]!.name;
+	let selectedTheme = currentThemeName ?? entries[0]!.name;
 	let closed = false;
 	let lastAppliedTheme: string | null = null;
 
