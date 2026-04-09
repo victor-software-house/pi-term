@@ -37,6 +37,74 @@ All debouncing and event handling architecture was carried over from `pi-cmux-th
 
 ---
 
+## Config, theme source, and persistence analysis
+
+### Where themes come from — still cmux
+
+`extensions/themes.ts` contains **463 embedded themes** as a hardcoded array. The file header says:
+
+```
+Generated from cmux Ghostty themes at:
+/Applications/cmux.app/Contents/Resources/ghostty/themes
+```
+
+This is a one-time static copy — it does not read from cmux at runtime. The original `pi-cmux-theme-picker` read themes dynamically from `/Applications/cmux.app/Contents/Resources/ghostty/themes` via `cmux.ts`. The fork replaced that with the embedded array but the data is still cmux Ghostty theme files.
+
+**Problem:** The embedded catalog is frozen at fork time. No mechanism to update it from upstream Ghostty/cmux themes or add custom themes. The comment still references cmux as the source of truth.
+
+### How config works
+
+Settings file: `~/.pi/agent/extensions/pi-term.json` (global) or `<cwd>/.pi/extensions/pi-term.json` (project override).
+
+Current on-disk config:
+```json
+{
+  "themeParams": { /* 24 generation parameters — all at defaults */ },
+  "previewDebounceMs": 200,
+  "themeOverrides": {}
+}
+```
+
+**Config controls theme *generation*, not theme *selection*.** The `ThemeParams` values (mutedWeight, dimWeight, bgShift, palette source mapping, tint strengths, contrast minimums) are fed to `resolveThemeColors()` + `generatePiTheme()` to build a Pi theme JSON from a terminal color palette. They do not affect which theme is selected or what the terminal looks like — only how the Pi UI interprets the terminal colors.
+
+Per-theme overrides (`themeOverrides`) allow scoped param tweaks per theme slug. These are managed via `/theme-settings`.
+
+### What happens on confirm
+
+1. `writeAndSetPiTheme()` generates a Pi theme JSON file → `~/.pi/agent/themes/term-sync-{slug}.json`
+2. Old `term-sync-*`, `cmux-sync-*`, `ghostty-sync-*` files are cleaned up
+3. `ctx.ui.setTheme(themeName)` registers the name with Pi's settingsManager (so Pi remembers `term-sync-{slug}` across restarts)
+4. `ctx.ui.setTheme(instance)` immediately overrides with a correctly-rendered in-memory instance
+5. `applyThemeToItermSync(entry)` sends the terminal colors to the bridge (session-local only)
+
+### What happens on session_start
+
+1. `loadSettings(ctx.cwd)` — reloads config from disk
+2. `initItermConnection()` — starts the Python bridge
+3. **Nothing else.** No theme is reapplied. No stored theme name is read. No iTerm2 colors are set.
+
+### The persistence gap (worse than PLAN.md described)
+
+The gap is **three-fold**, not just "new tabs don't get the theme":
+
+1. **No stored theme selection.** The config file (`pi-term.json`) stores `themeParams` (generation parameters) but does NOT store which theme was last selected. There is no `currentTheme` or `selectedTheme` field.
+
+2. **No session_start reapply.** Even if a theme name were stored, `session_start` does not read it or call `applyThemeToItermSync` or `writeAndSetPiTheme`. A new Pi session starts with whatever iTerm2 profile defaults to and whatever Pi theme Pi's own settingsManager remembered.
+
+3. **Pi settingsManager partial save.** `ctx.ui.setTheme(themeName)` tells Pi to remember `term-sync-{slug}`. On restart, Pi may reload the theme JSON from `~/.pi/agent/themes/term-sync-{slug}.json` — but the iTerm2 terminal colors are NOT reapplied. So Pi UI may show the right colors but the terminal is wrong. This is a split-brain state.
+
+4. **Terminal colors are session-local only.** `applyThemeToItermSync` changes the current iTerm2 session via protobuf. New tabs, new Pi sessions, and iTerm2 restarts all start with the profile default.
+
+### Legacy residue
+
+- `ROADMAP.md` still says "Ordered work inventory for `pi-cmux-theme-picker`"
+- `.changeset/config.json` still references `victor-software-house/pi-cmux-theme-picker`
+- `CHANGELOG.md` links point to `pi-cmux-theme-picker` repo
+- `pi-theme.ts` still cleans up `cmux-sync-*` and `ghostty-sync-*` files (harmless but stale)
+- The old cmux config had `autoSync: true` — that concept doesn't exist in pi-term
+
+---
+
 ## Confirmed facts
 
 | Fact | Evidence |
@@ -78,6 +146,13 @@ All debouncing and event handling architecture was carried over from `pi-cmux-th
 
 ## Next steps (ordered)
 
+### Step 0 — Clean up legacy references
+
+- Update `ROADMAP.md` header to say `pi-term`
+- Update `.changeset/config.json` repo reference to `pi-term`
+- Update themes.ts file header comment to remove cmux path reference
+- Remove stale `cmux-sync-*` / `ghostty-sync-*` cleanup from `pi-theme.ts` (keep `term-sync-*` only)
+
 ### Step 1 — Investigate bridge process lifecycle
 
 Research (not implement) the exact behavior of:
@@ -94,11 +169,25 @@ Output: a decision on which handlers to use, with evidence.
 - Research whether the bridge's `get_session()` following keyboard focus causes real problems (does the user switch tabs during picker use?)
 - If pinning is needed: implement as an isolated commit, test that preview still works after install
 
-### Step 3 — Implement `session_start` theme reapply
+### Step 3 — Implement theme persistence (config + session_start reapply)
 
-- On confirm, store the full color mapping (all hex values from the `ThemeEntry`) in `~/.pi/agent/extensions/pi-term.json`
-- On `session_start`, if stored colors exist, apply via `applyThemeToItermSync` (the bridge fire-and-forget path)
-- This gives every new Pi session the correct terminal theme without needing profile-level persistence
+This is more than "store full color mapping" — the config model needs a new field and session_start needs a reapply path.
+
+**Config change:**
+- Add `currentTheme: { name: string, colors: TerminalColors } | null` to `Settings` interface
+- On confirm (in picker and `/theme <name>`), store the theme name + full color data via `updateSettings()`
+- This is deliberately redundant with the Pi theme JSON file — the colors are needed for iTerm2 reapply without re-resolving from the embedded catalog
+
+**session_start change:**
+- After `loadSettings()` and `initItermConnection()`, check if `currentTheme` exists in settings
+- If yes: call `applyThemeToItermSync()` with a synthetic `ThemeEntry` from the stored colors
+- Also call `writeAndSetPiTheme()` to ensure the Pi UI matches
+- This makes every new Pi session restore both terminal AND Pi UI colors
+
+**Edge cases to handle:**
+- The bridge may not be ready yet when session_start fires — need to await `initItermConnection()` before reapply
+- If the stored theme was deleted from the embedded catalog (future concern), the name is still valid because we store full colors
+- Project-level config could override global theme — deliberate, matches the existing config merge model
 
 ### Step 4 — Investigate profile-level persistence
 
