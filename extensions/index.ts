@@ -402,7 +402,7 @@ class ThemePreview implements Component {
 
 export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle ---
-	pi.on("session_start", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		loadSettings(ctx.cwd);
 		cachedThemeNames = EMBEDDED_THEMES.map((e) => e.name);
 		await Promise.all([
@@ -467,10 +467,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Configure theme generation settings",
 
 		handler: async (_args, ctx) => {
-			// Use the first theme in the catalog for settings preview color swatches
-			const previewTheme = EMBEDDED_THEMES[0] ?? null;
-			const previewColors = previewTheme?.colors ?? null;
-			const currentThemeSlug = previewTheme ? slugifyThemeName(previewTheme.name) : null;
+			// Mirror cmux: use getCurrentTheme() + getEmbeddedThemeByName() as the
+			// authoritative source of current theme colors, exactly as cmux used
+			// getCurrentCmuxThemeName() + getCmuxThemeColors().
+			const currentThemeName = getCurrentTheme();
+			const currentThemeEntry = currentThemeName ? getEmbeddedThemeByName(currentThemeName) : null;
+			const currentThemeColors = currentThemeEntry?.colors ?? null;
+			const currentThemeSlug = currentThemeName ? slugifyThemeName(currentThemeName) : null;
 			let scope: "global" | string = "global";
 			const scopeLabel = (): string => (scope === "global" ? "global" : scope);
 			const paramsForScope = (): ThemeParams => (scope === "global" ? getThemeParams() : getThemeParams(scope));
@@ -490,14 +493,14 @@ export default function (pi: ExtensionAPI) {
 					"bg",
 				];
 
-				const bg = previewColors?.background;
-				const fg = previewColors?.foreground;
-				const error = previewColors ? ensureSemanticHue(resolvePaletteSourceColor(previewColors, p.errorSource), 0, p.errorFallback) : p.errorFallback;
-				const success = previewColors ? ensureSemanticHue(resolvePaletteSourceColor(previewColors, p.successSource), 120, p.successFallback) : p.successFallback;
-				const accent = previewColors ? (resolvePaletteSourceColor(previewColors, p.accentSource) || p.accentFallback) : p.accentFallback;
+				const bg = currentThemeColors?.background;
+				const fg = currentThemeColors?.foreground;
+				const error = currentThemeColors ? ensureSemanticHue(resolvePaletteSourceColor(currentThemeColors, p.errorSource), 0, p.errorFallback) : p.errorFallback;
+				const success = currentThemeColors ? ensureSemanticHue(resolvePaletteSourceColor(currentThemeColors, p.successSource), 120, p.successFallback) : p.successFallback;
+				const accent = currentThemeColors ? (resolvePaletteSourceColor(currentThemeColors, p.accentSource) || p.accentFallback) : p.accentFallback;
 				const sourceSwatch = (source: keyof Pick<ThemeParams, "errorSource" | "successSource" | "warningSource" | "linkSource" | "accentSource" | "accentAltSource">, fallback: string): string => {
-					if (!previewColors) return swatch(fallback);
-					return swatch(resolvePaletteSourceColor(previewColors, p[source]) || fallback);
+					if (!currentThemeColors) return swatch(fallback);
+					return swatch(resolvePaletteSourceColor(currentThemeColors, p[source]) || fallback);
 				};
 				const globalParams = getThemeParams();
 				const isOverridden = <K extends keyof ThemeParams>(key: K): boolean =>
@@ -531,9 +534,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Trailing-only debounce — reads latest in-memory params, never blocks input.
 			const applyPreview = debounce(() => {
-				if (!previewColors || !previewTheme) return;
-				const slug = slugifyThemeName(previewTheme.name);
-				const instance = buildThemeInstance(previewColors, `term-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
+				if (!currentThemeColors || !currentThemeName) return;
+				const slug = slugifyThemeName(currentThemeName);
+				const instance = buildThemeInstance(currentThemeColors, `term-preview-${slug}-${Date.now()}`, paramsForScope(), ctx);
 				ctx.ui.setTheme(instance);
 			}, getPreviewDebounceMs());
 
@@ -592,8 +595,8 @@ export default function (pi: ExtensionAPI) {
 					beforeClose?.();
 					applyPreview.cancel();
 					schedulePersist.flush();
-					if (previewColors && previewTheme) {
-						writeAndSetPiTheme(ctx, previewColors, previewTheme.name, getThemeParams(currentThemeSlug ?? undefined));
+					if (currentThemeColors && currentThemeName) {
+						writeAndSetPiTheme(ctx, currentThemeColors, currentThemeName, getThemeParams(currentThemeSlug ?? undefined));
 					}
 					done(undefined);
 				};
