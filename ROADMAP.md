@@ -1,6 +1,6 @@
 # Roadmap
 
-Ordered work inventory for `pi-cmux-theme-picker`.
+Ordered work inventory for `pi-term`.
 Detailed decision records and implementation notes live in [`docs/decisions/`](docs/decisions/).
 
 ## Next
@@ -26,6 +26,8 @@ Detailed decision records and implementation notes live in [`docs/decisions/`](d
 
 ## Future
 
+- [x] **Theme persistence** — store selected theme in settings, reapply on `session_start` (Pi UI + iTerm2 session). (`c8c9b17`) ✔
+- [ ] Profile-level persistence — write to iTerm2 profile so new tabs also get the theme
 - [ ] Theme export: `/theme export` to copy current theme JSON to clipboard
 - [ ] Theme import: `/theme import <path>` to load a custom theme file
 - [ ] Per-project theme profiles: auto-apply different themes per repo via project config

@@ -87,13 +87,13 @@ Per-theme overrides (`themeOverrides`) allow scoped param tweaks per theme slug.
 
 The gap is **three-fold**, not just "new tabs don't get the theme":
 
-1. **No stored theme selection.** The config file (`pi-term.json`) stores `themeParams` (generation parameters) but does NOT store which theme was last selected. There is no `currentTheme` or `selectedTheme` field.
+1. **No stored theme selection.** ~~The config file (`pi-term.json`) stores `themeParams` (generation parameters) but does NOT store which theme was last selected. There is no `currentTheme` or `selectedTheme` field.~~ **RESOLVED** — `currentTheme` field added to Settings (`c8c9b17`).
 
-2. **No session_start reapply.** Even if a theme name were stored, `session_start` does not read it or call `applyThemeToItermSync` or `writeAndSetPiTheme`. A new Pi session starts with whatever iTerm2 profile defaults to and whatever Pi theme Pi's own settingsManager remembered.
+2. **No session_start reapply.** ~~Even if a theme name were stored, `session_start` does not read it or call `applyThemeToItermSync` or `writeAndSetPiTheme`. A new Pi session starts with whatever iTerm2 profile defaults to and whatever Pi theme Pi's own settingsManager remembered.~~ **RESOLVED** — session_start now reapplies stored theme after bridge init (`c8c9b17`).
 
-3. **Pi settingsManager partial save.** `ctx.ui.setTheme(themeName)` tells Pi to remember `term-sync-{slug}`. On restart, Pi may reload the theme JSON from `~/.pi/agent/themes/term-sync-{slug}.json` — but the iTerm2 terminal colors are NOT reapplied. So Pi UI may show the right colors but the terminal is wrong. This is a split-brain state.
+3. **Pi settingsManager partial save.** `ctx.ui.setTheme(themeName)` tells Pi to remember `term-sync-{slug}`. On restart, Pi may reload the theme JSON from `~/.pi/agent/themes/term-sync-{slug}.json` — but the iTerm2 terminal colors are NOT reapplied. So Pi UI may show the right colors but the terminal is wrong. ~~This is a split-brain state.~~ **RESOLVED** — session_start reapply ensures both Pi UI and iTerm2 session match.
 
-4. **Terminal colors are session-local only.** `applyThemeToItermSync` changes the current iTerm2 session via protobuf. New tabs, new Pi sessions, and iTerm2 restarts all start with the profile default.
+4. **Terminal colors are session-local only.** `applyThemeToItermSync` changes the current iTerm2 session via protobuf. New tabs, new Pi sessions, and iTerm2 restarts all start with the profile default. **OPEN** — profile-level persistence (Step 4) would fix this for new tabs.
 
 ### Legacy residue
 
@@ -169,25 +169,15 @@ Output: a decision on which handlers to use, with evidence.
 - Research whether the bridge's `get_session()` following keyboard focus causes real problems (does the user switch tabs during picker use?)
 - If pinning is needed: implement as an isolated commit, test that preview still works after install
 
-### Step 3 — Implement theme persistence (config + session_start reapply)
+### Step 3 — Implement theme persistence (config + session_start reapply) ✔
 
-This is more than "store full color mapping" — the config model needs a new field and session_start needs a reapply path.
+**Done in `c8c9b17`.** Implementation:
 
-**Config change:**
-- Add `currentTheme: { name: string, colors: TerminalColors } | null` to `Settings` interface
-- On confirm (in picker and `/theme <name>`), store the theme name + full color data via `updateSettings()`
-- This is deliberately redundant with the Pi theme JSON file — the colors are needed for iTerm2 reapply without re-resolving from the embedded catalog
-
-**session_start change:**
-- After `loadSettings()` and `initItermConnection()`, check if `currentTheme` exists in settings
-- If yes: call `applyThemeToItermSync()` with a synthetic `ThemeEntry` from the stored colors
-- Also call `writeAndSetPiTheme()` to ensure the Pi UI matches
-- This makes every new Pi session restore both terminal AND Pi UI colors
-
-**Edge cases to handle:**
-- The bridge may not be ready yet when session_start fires — need to await `initItermConnection()` before reapply
-- If the stored theme was deleted from the embedded catalog (future concern), the name is still valid because we store full colors
-- Project-level config could override global theme — deliberate, matches the existing config merge model
+- Added `currentTheme: string | null` to `Settings` interface with `getCurrentTheme()`/`setCurrentTheme()` helpers
+- Both confirm paths (picker + `/theme <name>`) call `setCurrentTheme(name)` after apply
+- `session_start` reapplies after `await initItermConnection()`: looks up theme from embedded catalog, calls `writeAndSetPiTheme` + `applyThemeToItermSync`
+- Cancel/escape does NOT clear `currentTheme` — last confirmed theme persists
+- Stores theme name only (not full colors) — looked up from `EMBEDDED_THEMES` at reapply time
 
 ### Step 4 — Investigate profile-level persistence
 
