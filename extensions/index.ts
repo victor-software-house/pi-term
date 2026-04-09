@@ -88,6 +88,24 @@ function parseCommandThemeName(args: string): string {
 	return trimmed;
 }
 
+/** Mirror of cmux's syncCurrentCmuxThemeToPi — restores Pi theme from stored selection.
+ * Guard: skips if Pi already has the correct theme applied (avoids double-apply on reload). */
+function syncStoredThemeToPi(ctx: SessionContext): void {
+	const storedName = getCurrentTheme();
+	if (!storedName) return;
+	const entry = getEmbeddedThemeByName(storedName);
+	if (!entry) return;
+	const slug = slugifyThemeName(storedName);
+	const themeName = slug ? `term-sync-${slug}` : `term-sync-unknown`;
+	const params = getThemeParams(slug);
+	// Only write/set Pi theme if not already applied — mirrors cmux guard
+	if (ctx.ui.theme.name !== themeName) {
+		writeAndSetPiTheme(ctx, entry.colors, storedName, params);
+	}
+	// Always restore status bar (cleared on reload)
+	updateStatus(ctx, storedName, params);
+}
+
 /** Render a single truecolor block for a hex color. */
 /** Color swatch using background color — doesn't interfere with fg accent on selection. */
 function swatch(hex: string): string {
@@ -384,7 +402,7 @@ class ThemePreview implements Component {
 
 export default function (pi: ExtensionAPI) {
 	// --- Session lifecycle ---
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		loadSettings(ctx.cwd);
 		cachedThemeNames = EMBEDDED_THEMES.map((e) => e.name);
 		await Promise.all([
@@ -392,16 +410,17 @@ export default function (pi: ExtensionAPI) {
 			initItermConnection(),
 		]);
 
-		// Reapply stored theme to both Pi UI and iTerm2 session
-		const storedName = getCurrentTheme();
-		if (storedName) {
-			const entry = getEmbeddedThemeByName(storedName);
-			if (entry) {
-				const slug = slugifyThemeName(storedName);
-				const params = getThemeParams(slug);
-				writeAndSetPiTheme(ctx, entry.colors, storedName, params);
-				applyThemeToItermSync(entry);
-				updateStatus(ctx, storedName, params);
+		// Sync Pi theme — guard skips writeAndSetPiTheme if already applied on reload
+		syncStoredThemeToPi(ctx);
+
+		// Apply iTerm2 terminal colors — skip on reload (bridge alive, terminal unchanged)
+		// event.reason exists at runtime but may be absent in older local type definitions
+		const isReload = (event as any)?.reason === "reload";
+		if (!isReload) {
+			const storedName = getCurrentTheme();
+			if (storedName) {
+				const entry = getEmbeddedThemeByName(storedName);
+				if (entry) applyThemeToItermSync(entry);
 			}
 		}
 	});
