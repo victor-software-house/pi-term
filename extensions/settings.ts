@@ -19,12 +19,14 @@ export interface ThemeOverride {
 }
 
 export interface Settings {
+	currentTheme: string | null;
 	themeParams: ThemeParams;
 	previewDebounceMs: number;
 	themeOverrides: Record<string, ThemeOverride>;
 }
 
 const DEFAULTS: Settings = {
+	currentTheme: null,
 	themeParams: { ...DEFAULT_THEME_PARAMS },
 	previewDebounceMs: 200,
 	themeOverrides: {},
@@ -35,6 +37,19 @@ let current: Settings = {
 	themeParams: { ...DEFAULTS.themeParams },
 	themeOverrides: {},
 };
+
+// --- Current theme ---
+
+/** Get the stored theme name (null if none confirmed yet). */
+export function getCurrentTheme(): string | null {
+	return current.currentTheme ?? null;
+}
+
+/** Store the confirmed theme name and persist to disk. */
+export function setCurrentTheme(name: string | null): void {
+	current.currentTheme = name;
+	writeConfigFile(globalConfigPath(), current);
+}
 
 // --- Paths ---
 

@@ -26,6 +26,8 @@ import {
 	resetThemeParams,
 	setOverrideEnabled,
 	clearOverrideParam,
+	getCurrentTheme,
+	setCurrentTheme,
 } from "./settings.js";
 import { DEFAULT_THEME_PARAMS, type SessionContext, type ThemeParams } from "./types.js";
 import { EMBEDDED_THEMES, getEmbeddedThemeByName } from "./themes.js";
@@ -389,6 +391,19 @@ export default function (pi: ExtensionAPI) {
 			captureRunner(pi),
 			initItermConnection(),
 		]);
+
+		// Reapply stored theme to both Pi UI and iTerm2 session
+		const storedName = getCurrentTheme();
+		if (storedName) {
+			const entry = getEmbeddedThemeByName(storedName);
+			if (entry) {
+				const slug = slugifyThemeName(storedName);
+				const params = getThemeParams(slug);
+				writeAndSetPiTheme(ctx, entry.colors, storedName, params);
+				applyThemeToItermSync(entry);
+				updateStatus(ctx, storedName, params);
+			}
+		}
 	});
 
 	// --- /theme command ---
@@ -414,6 +429,7 @@ export default function (pi: ExtensionAPI) {
 				const params = getThemeParams(slugifyThemeName(themeArg));
 				writeAndSetPiTheme(ctx, theme.colors, themeArg, params);
 				applyThemeToItermSync(theme);
+				setCurrentTheme(themeArg);
 				updateStatus(ctx, themeArg, params);
 				ctx.ui.notify(`Theme "${themeArg}" applied`, "info");
 				return;

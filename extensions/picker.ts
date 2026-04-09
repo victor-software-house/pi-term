@@ -24,7 +24,7 @@ import {
 	type ItermThemeSnapshot,
 } from "./iterm2.js";
 import { writeAndSetPiTheme, buildThemeInstance, slugifyThemeName } from "./pi-theme.js";
-import { getThemeParams, getPreviewDebounceMs } from "./settings.js";
+import { getThemeParams, getPreviewDebounceMs, setCurrentTheme } from "./settings.js";
 import type { ThemeEntry, FilterMode, CommandContext } from "./types.js";
 
 function isPrintableInput(data: string): boolean {
@@ -106,6 +106,7 @@ export async function showThemePicker(_pi: ExtensionAPI, ctx: CommandContext): P
 		writeAndSetPiTheme(ctx, entry.colors, themeName, getThemeParams(slugifyThemeName(themeName)));
 
 		applyThemeToItermSync(entry);
+		setCurrentTheme(themeName);
 
 		done(themeName);
 	};
