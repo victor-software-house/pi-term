@@ -1,443 +1,199 @@
 # pi-term execution plan
 
-## Objective
+## Status: working baseline restored
 
-Convert this hard fork of `pi-cmux-theme-picker` into `pi-term`: an iTerm2-first Pi extension that uses an embedded theme catalog and live theme mutation through `@shadr/iterm2-ts`.
+Commit `136587b` on `feat/iterm2-migration` — tree identical to `45a423b` (the only operator-confirmed working state) plus a response-queue fix in the bridge.
 
-This document is intentionally detailed enough to drive multiple uninterrupted implementation sessions without re-planning in chat.
+Preview works. Persistence to iTerm2 profiles does not exist yet. Bridge process lifecycle is not managed.
 
-## Current grounded state
+---
 
-### Repo status
+## Current working architecture
 
-- Package metadata renamed to `pi-term`.
-- `README.md` and `AGENTS.md` describe the fork direction.
-- `@shadr/iterm2-ts` added as a dependency and installed.
-- Both lockfiles synced (`bun.lock`, `pnpm-lock.yaml`).
-- The extension code is still almost entirely cmux-shaped.
+```
+picker.ts handleInput
+  → updates selectedTheme + tui.requestRender()   (sync, <1ms)
+  → schedules applyPreview via trailing debounce   (200ms cooldown)
 
-### Existing files of interest
+applyPreview (debounce fires)
+  → applyThemeToItermSync(entry)                   (stdin write, 0ms caller cost)
+  → buildThemeInstance + ctx.ui.setTheme            (sync, ~24ms Pi re-render)
 
-```text
-extensions/
-  cmux.ts       — legacy, to be removed
-  colors.ts     — pure color math, reusable as-is
-  index.ts      — main entrypoint, heavily cmux-coupled
-  pi-theme.ts   — Pi theme generation, reusable with renames
-  picker.ts     — TUI picker, reusable with backend swap
-  settings.ts   — persistence, needs path rename
-  types.ts      — shared types, needs type renames
+iterm2.ts applyThemeToItermSync
+  → _bridge.stdin.write(JSON.stringify({cmd:"apply", colors}) + "\n")
+  → returns immediately — no await, no callback
+
+iterm2-bridge.py apply handler
+  → LocalWriteOnlyProfile accumulates 22 colors
+  → session.async_set_profile_properties(lwop)     (single batched protobuf, ~14ms)
+  → no response sent (fire-and-forget, response-queue fix)
 ```
 
-## Validated technical facts
+**Two key factors enabling instantaneous feel:**
+1. Fire-and-forget stdin write — caller never waits for the bridge
+2. Single batched protobuf message for all 22 color properties — one round-trip, not 22
 
-These were confirmed by live experiments, not assumptions:
+All debouncing and event handling architecture was carried over from `pi-cmux-theme-picker` and is a given.
 
-### 1. Sequential property apply is too slow
+---
 
-22 sequential `setProfileProperty` calls: **~2350ms**.
-This is unusable for live preview with 200ms debounce.
+## Config, theme source, and persistence analysis
 
-### 2. Parallel apply via `Promise.all` is fast enough
+### Where themes come from — still cmux
 
-22 parallel `setProfileProperty` calls: **~260-300ms**.
-This is viable for debounced preview. The debounce cooldown absorbs the apply time.
+`extensions/themes.ts` contains **463 embedded themes** as a hardcoded array. The file header says:
 
-**Critical implementation rule: always use `Promise.all` for iTerm2 color apply and restore.**
+```
+Generated from cmux Ghostty themes at:
+/Applications/cmux.app/Contents/Resources/ghostty/themes
+```
 
-### 3. Full round-trip works with zero mismatches
+This is a one-time static copy — it does not read from cmux at runtime. The original `pi-cmux-theme-picker` read themes dynamically from `/Applications/cmux.app/Contents/Resources/ghostty/themes` via `cmux.ts`. The fork replaced that with the embedded array but the data is still cmux Ghostty theme files.
 
-Capture → apply different theme → restore → verify: **zero mismatches**.
-The snapshot/restore path is reliable.
+**Problem:** The embedded catalog is frozen at fork time. No mechanism to update it from upstream Ghostty/cmux themes or add custom themes. The comment still references cmux as the source of truth.
 
-### 4. Connection speed
+### How config works
 
-- First connect: ~300ms
-- Reconnect (warm cookie): ~280ms
+Settings file: `~/.pi/agent/extensions/pi-term.json` (global) or `<cwd>/.pi/extensions/pi-term.json` (project override).
 
-Implication: a persistent connection during picker use is strongly preferred over connect-per-preview. Connect once when picker opens, disconnect on close.
-
-### 5. Extension dependency resolution
-
-Pi extensions resolve dependencies from their own `node_modules/`.
-`@shadr/iterm2-ts` is now installed as a proper dependency and will resolve correctly at extension load time.
-
-### 6. Embedded theme color shape is compatible with Pi theme generation
-
-`CmuxColors` = `{ background: string, foreground: string, palette: Record<number, string> }`.
-The planned `EmbeddedTheme.colors` has exactly the same shape plus optional cursor/selection fields.
-Pi theme generation can consume embedded themes with no structural changes — only renames.
-
-### 7. iTerm2 color property format
-
-Values are JSON objects with 0-1 float components:
+Current on-disk config:
 ```json
 {
-  "Red Component": 0.08,
-  "Green Component": 0.08,
-  "Blue Component": 0.08,
-  "Alpha Component": 1,
-  "Color Space": "sRGB"
+  "themeParams": { /* 24 generation parameters — all at defaults */ },
+  "previewDebounceMs": 200,
+  "themeOverrides": {}
 }
 ```
 
-Property keys use title case with spaces:
-- `Background Color`, `Foreground Color`, `Cursor Color`, `Cursor Text Color`
-- `Selection Color`, `Selected Text Color`
-- `Ansi 0 Color` … `Ansi 15 Color`
+**Config controls theme *generation*, not theme *selection*.** The `ThemeParams` values (mutedWeight, dimWeight, bgShift, palette source mapping, tint strengths, contrast minimums) are fed to `resolveThemeColors()` + `generatePiTheme()` to build a Pi theme JSON from a terminal color palette. They do not affect which theme is selected or what the terminal looks like — only how the Pi UI interprets the terminal colors.
 
-### 8. The TS SDK does not expose batch/preset APIs
+Per-theme overrides (`themeOverrides`) allow scoped param tweaks per theme slug. These are managed via `/theme-settings`.
 
-`@shadr/iterm2-ts` wraps each call as a single protobuf request. The underlying protobuf schema supports `assignments` (batch), but the SDK does not expose it. However, `Promise.all` over the existing single-property API is fast enough, so this is not a blocker.
+### What happens on confirm
 
-## Non-goals for the first migration pass
+1. `writeAndSetPiTheme()` generates a Pi theme JSON file → `~/.pi/agent/themes/term-sync-{slug}.json`
+2. Old `term-sync-*`, `cmux-sync-*`, `ghostty-sync-*` files are cleaned up
+3. `ctx.ui.setTheme(themeName)` registers the name with Pi's settingsManager (so Pi remembers `term-sync-{slug}` across restarts)
+4. `ctx.ui.setTheme(instance)` immediately overrides with a correctly-rendered in-memory instance
+5. `applyThemeToItermSync(entry)` sends the terminal colors to the bridge (session-local only)
 
-- multi-terminal abstraction beyond iTerm2
-- preset-based iTerm2 integration
-- startup theme autodetection from iTerm2 preset matching
-- importing the full theme catalog before one embedded theme works end-to-end
-- large UX redesign of the picker
-- test suite buildout before the basic migration runs manually end-to-end
+### What happens on session_start
 
-## Detailed phase plan
+1. `loadSettings(ctx.cwd)` — reloads config from disk
+2. `initItermConnection()` — starts the Python bridge
+3. **Nothing else.** No theme is reapplied. No stored theme name is read. No iTerm2 colors are set.
 
----
+### The persistence gap (worse than PLAN.md described)
 
-## Phase 1 — terminology and file responsibility cleanup
+The gap is **three-fold**, not just "new tabs don't get the theme":
 
-### Goal
+1. **No stored theme selection.** ~~The config file (`pi-term.json`) stores `themeParams` (generation parameters) but does NOT store which theme was last selected. There is no `currentTheme` or `selectedTheme` field.~~ **RESOLVED** — `currentTheme` field added to Settings (`c8c9b17`).
 
-Make the codebase readable as `pi-term` before changing deeper behavior.
+2. **No session_start reapply.** ~~Even if a theme name were stored, `session_start` does not read it or call `applyThemeToItermSync` or `writeAndSetPiTheme`. A new Pi session starts with whatever iTerm2 profile defaults to and whatever Pi theme Pi's own settingsManager remembered.~~ **RESOLVED** — session_start now reapplies stored theme after bridge init (`c8c9b17`).
 
-### Files to touch
+3. **Pi settingsManager partial save.** `ctx.ui.setTheme(themeName)` tells Pi to remember `term-sync-{slug}`. On restart, Pi may reload the theme JSON from `~/.pi/agent/themes/term-sync-{slug}.json` — but the iTerm2 terminal colors are NOT reapplied. So Pi UI may show the right colors but the terminal is wrong. ~~This is a split-brain state.~~ **RESOLVED** — session_start reapply ensures both Pi UI and iTerm2 session match.
 
-- `extensions/index.ts`
-- `extensions/picker.ts`
-- `extensions/pi-theme.ts`
-- `extensions/settings.ts`
-- `extensions/types.ts`
+4. **Terminal colors are session-local only.** `applyThemeToItermSync` changes the current iTerm2 session via protobuf. New tabs, new Pi sessions, and iTerm2 restarts all start with the profile default. **OPEN** — profile-level persistence (Step 4) would fix this for new tabs.
 
-### Required changes
+### Legacy residue
 
-1. Replace user-facing mentions of `cmux`, `ghostty`, `pi-cmux-theme-picker`.
-2. Rename status keys and transient labels:
-   - `cmux-theme` → `terminal-theme`
-   - `cmux-preview-*` → `term-preview-*`
-   - `cmux-sync-*` → `term-sync-*`
-   - `cmux-restore-*` → `term-restore-*`
-3. Rename settings filename: `pi-cmux-theme-picker.json` → `pi-term.json`
-4. Rename types:
-   - `CmuxColors` → `TerminalColors`
-   - `CmuxThemeEntry` → `ThemeEntry`
-5. Update all comments.
-
-### Acceptance criteria
-
-- Grep for `cmux` in `extensions/*.ts` returns zero outside of `cmux.ts` itself.
-- Grep for `pi-cmux-theme-picker` returns zero outside historical docs.
-
-### Suggested commit
-
-- `refactor: rename cmux-era concepts to pi-term terminology`
+- `ROADMAP.md` still says "Ordered work inventory for `pi-cmux-theme-picker`"
+- `.changeset/config.json` still references `victor-software-house/pi-cmux-theme-picker`
+- `CHANGELOG.md` links point to `pi-cmux-theme-picker` repo
+- `pi-theme.ts` still cleans up `cmux-sync-*` and `ghostty-sync-*` files (harmless but stale)
+- The old cmux config had `autoSync: true` — that concept doesn't exist in pi-term
 
 ---
 
-## Phase 2 — add embedded theme model
+## Confirmed facts
 
-### Goal
+| Fact | Evidence |
+|:--|:--|
+| Bridge batched apply works and feels instantaneous | Operator confirmed at entry `93c7e2db`: "it works quite well in the preview screen" |
+| Bridge `apply` is session-local only | `session.async_set_profile_properties(lwop)` changes the current session, not the profile. New tabs are unaffected. |
+| `session.async_get_profile().all_properties["Guid"]` returns a session-local copy GUID | Proven in session `bdc641ec` — batched persist to that GUID had no effect on new tabs |
+| `PartialProfile.async_get_full_profile()._guids_for_set()` returns the correct profile GUID | Proven in session `bdc641ec` at entry `38e78863`: "that definitely worked, updated all tabs simultaneously" |
+| Batched `async_set_profile_properties_json(conn, None, assignments, guids=...)` writes to the real profile | Same evidence as above — but needs re-validation in the current clean baseline |
+| Direct plist writes do not affect running iTerm2 | Proven failed at entry `0d87d69c` |
+| OSC escape sequences to `/dev/tty` change terminal colors | Proven in eval during session `bdc641ec` — but never tested in the actual working picker. Unknown whether this is the same mechanism as the protobuf API or a different subsystem. |
+| Bridge response queue corruption | `apply`/`restore` responses can resolve a pending `snapshot` promise. Fixed by making them fire-and-forget (current state). |
 
-Define the new theme source of truth.
+## Unconfirmed claims that need investigation
 
-### New file
-
-- `extensions/themes.ts`
-
-### Theme shape
-
-```ts
-export interface EmbeddedTheme {
-  name: string;
-  isDark: boolean;
-  colors: TerminalColors;    // { background, foreground, palette }
-  cursor?: string;
-  cursorText?: string;
-  selectionBackground?: string;
-  selectionForeground?: string;
-}
-```
-
-This reuses `TerminalColors` (renamed from `CmuxColors`) directly, so Pi theme generation works without adapter code.
-
-### Initial content
-
-One theme: `Tomorrow Night Burns`.
-
-### Exported API
-
-- `getEmbeddedThemes(): EmbeddedTheme[]`
-- `getEmbeddedThemeByName(name: string): EmbeddedTheme | undefined`
-
-### Suggested commit
-
-- `feat: add embedded theme catalog with Tomorrow Night Burns`
+| Claim | Status | How to verify |
+|:--|:--|:--|
+| `process.on("exit")` reliably kills spawned children | Unverified | Check Node docs for spawn cleanup guarantees on exit vs SIGTERM vs SIGINT vs uncaughtException |
+| `session_shutdown` Pi hook fires reliably on all session end paths | Unverified | Check Pi docs/source for when session_shutdown fires (reload, new session, quit, crash) |
+| Whether both `process.on("exit")` and `session_shutdown` are needed or redundant | Unverified | Investigate which scenarios each covers |
+| `ITERM_SESSION_ID` env var is always available in Pi's process | Unverified | Check `process.env.ITERM_SESSION_ID` in the current environment via probe_eval |
+| Session pinning does not break preview | Unverified | Must be tested as an isolated commit against the working baseline |
+| OSC escape sequences are a different iTerm2 subsystem than the protobuf API | Unverified | Needs research — do not assume they are interchangeable or equivalent |
+| Bridge asyncio loop blocks during ~530ms persist | Unverified | Would matter if preview uses the bridge. If preview moves to escape sequences, irrelevant — but escape sequences are not yet proven in the picker. |
 
 ---
 
-## Phase 3 — add iTerm2 adapter
+## Decisions
 
-### Goal
+1. **Preview stays on the bridge.** The fire-and-forget stdin write + batched protobuf is the proven hot path. Do not replace it until an alternative is proven in the actual picker, not just eval.
 
-Isolated iTerm2 integration layer.
+2. **Persistence is deferred to `session_start` reapply.** Store the full color mapping (not just the name) in the extension settings JSON. On `session_start`, if a stored theme exists, apply it via the bridge. This sidesteps the profile persistence latency problem entirely for now.
 
-### New file
+3. **Profile-level persistence is a separate investigation.** The `PartialProfile.async_get_full_profile()._guids_for_set()` + batched `async_set_profile_properties_json` path was proven once. It needs re-validation against the current clean baseline before being wired in. It is not a blocker for the extension being usable.
 
-- `extensions/iterm2.ts`
-
-### Design constraints from experiments
-
-1. **Use `Promise.all` for all multi-property operations** — sequential is 10x slower.
-2. **Maintain a persistent connection** during picker use — connect once, disconnect on close.
-3. **Capture full snapshot before preview starts** — 22 properties, parallel read.
-
-### Connection management
-
-```ts
-let connection: ITerm2 | null = null;
-
-export async function ensureConnection(): Promise<ITerm2>
-export function disconnectIterm(): void
-```
-
-The picker opens → `ensureConnection()`. The picker closes → `disconnectIterm()`.
-
-### Properties to capture/apply
-
-```ts
-const ITERM_COLOR_KEYS = [
-  'Background Color', 'Foreground Color',
-  'Cursor Color', 'Cursor Text Color',
-  'Selection Color', 'Selected Text Color',
-  ...Array.from({ length: 16 }, (_, i) => `Ansi ${i} Color`),
-];
-```
-
-### Proposed API
-
-```ts
-export interface ItermThemeSnapshot {
-  sessionId: string;
-  values: Record<string, unknown>;
-}
-
-export function hexToItermColor(hex: string): ItermColorValue
-
-export async function getActiveSessionId(): Promise<string | null>
-export async function captureSnapshot(sessionId?: string): Promise<ItermThemeSnapshot | null>
-export async function applyTheme(theme: EmbeddedTheme, sessionId?: string): Promise<void>
-export async function restoreSnapshot(snapshot: ItermThemeSnapshot): Promise<void>
-```
-
-### Suggested commit
-
-- `feat: add iterm2 adapter with parallel color apply`
+4. **Each change is an isolated commit tested against the working baseline.** No multi-concern commits. Operator re-confirms after each install.
 
 ---
 
-## Phase 4 — rewire picker to use embedded themes + iTerm2
+## Next steps (ordered)
 
-### Goal
+### Step 0 — Clean up legacy references
 
-Replace cmux backend in picker while keeping UX intact.
+- Update `ROADMAP.md` header to say `pi-term`
+- Update `.changeset/config.json` repo reference to `pi-term`
+- Update themes.ts file header comment to remove cmux path reference
+- Remove stale `cmux-sync-*` / `ghostty-sync-*` cleanup from `pi-theme.ts` (keep `term-sync-*` only)
 
-### Files to touch
+### Step 1 — Investigate bridge process lifecycle
 
-- `extensions/picker.ts`
+Research (not implement) the exact behavior of:
+- `process.on("exit")` — does it fire on SIGTERM? SIGINT? uncaughtException? Does `child.kill()` work inside it?
+- `process.on("SIGTERM")` and `process.on("SIGINT")` — overlap with exit handler?
+- Pi's `session_shutdown` hook — when exactly does it fire? reload? new session? quit? crash?
+- Which combination is actually needed to guarantee the bridge subprocess is killed in all cases?
 
-### Required changes
+Output: a decision on which handlers to use, with evidence.
 
-1. Replace `getAvailableCmuxThemes()` → `getEmbeddedThemes()`
-2. Replace `getCurrentCmuxThemeName()` → `getActiveSessionId()` + `captureSnapshot()`
-3. Replace preview apply:
-   - build Pi theme instance from `EmbeddedTheme.colors`
-   - call `applyTheme(theme)` (iTerm2, parallel)
-4. Replace confirm:
-   - `writeAndSetPiTheme()` from embedded colors
-   - iTerm2 theme already applied, just disconnect
-5. Replace cancel:
-   - `restoreSnapshot()` (iTerm2, parallel)
-   - restore Pi theme from snapshot-built instance
-6. Connection lifecycle:
-   - `ensureConnection()` at picker open
-   - `disconnectIterm()` at picker close (confirm or cancel)
+### Step 2 — Investigate and test session pinning
 
-### `handleInput` contract preserved
+- Verify `ITERM_SESSION_ID` is present in `process.env` via `probe_eval`
+- Research whether the bridge's `get_session()` following keyboard focus causes real problems (does the user switch tabs during picker use?)
+- If pinning is needed: implement as an isolated commit, test that preview still works after install
 
-No change. Still zero heavy work. Debounce still reads shared state.
+### Step 3 — Implement theme persistence (config + session_start reapply) ✔
 
-### Suggested commit
+**Done in `c8c9b17`.** Implementation:
 
-- `feat: drive picker from embedded themes and iterm2`
+- Added `currentTheme: string | null` to `Settings` interface with `getCurrentTheme()`/`setCurrentTheme()` helpers
+- Both confirm paths (picker + `/theme <name>`) call `setCurrentTheme(name)` after apply
+- `session_start` reapplies after `await initItermConnection()`: looks up theme from embedded catalog, calls `writeAndSetPiTheme` + `applyThemeToItermSync`
+- Cancel/escape does NOT clear `currentTheme` — last confirmed theme persists
+- Stores theme name only (not full colors) — looked up from `EMBEDDED_THEMES` at reapply time
 
----
+### Step 4 — Investigate profile-level persistence
 
-## Phase 5 — refactor Pi theme generation naming
-
-### Files to touch
-
-- `extensions/pi-theme.ts`
-- `extensions/types.ts`
-
-### Changes
-
-1. Rename comments/types away from cmux.
-2. Change file prefixes: `cmux-sync-*` → `term-sync-*`.
-3. Add transitional cleanup for old `cmux-sync-*` and `ghostty-sync-*` artifacts.
-4. Accept `TerminalColors` (same shape, new name).
-
-### Suggested commit
-
-- `refactor: rename pi theme artifacts for pi-term`
+- Re-validate the `PartialProfile.async_get_full_profile()._guids_for_set()` + `async_set_profile_properties_json` path using `probe_eval` against the current baseline
+- Measure latency
+- Determine if it blocks the bridge asyncio loop and whether that matters
+- If proven: add a `persist` bridge command, called fire-and-forget on confirm only. Isolated commit.
 
 ---
 
-## Phase 6 — replace cmux logic in index.ts
+## Smoke test checklist (current baseline)
 
-### Files to touch
-
-- `extensions/index.ts`
-
-### Changes
-
-1. Remove cmux imports.
-2. Replace `/theme "Name"` direct-apply to use embedded themes + iTerm2.
-3. Replace session-start sync:
-   - **For now: disable auto-sync.** Only explicit `/theme` actions apply themes.
-   - Document as future work.
-4. Update command descriptions and notifications.
-
-### Suggested commit
-
-- `refactor: remove cmux integration from entrypoint`
-
----
-
-## Phase 7 — settings migration
-
-### Files to touch
-
-- `extensions/settings.ts`
-
-### Changes
-
-1. Rename `CONFIG_FILENAME` to `pi-term.json`.
-2. On first read, check legacy path and migrate silently.
-3. Remove cmux-specific settings if any exist.
-
-### Suggested commit
-
-- `refactor: migrate settings to pi-term paths`
-
----
-
-## Phase 8 — delete cmux.ts
-
-### Suggested commit
-
-- `refactor: remove legacy cmux adapter`
-
----
-
-## Phase 9 — expand theme catalog
-
-### Approach
-
-1. Write a generation script that reads Ghostty theme files and outputs a TS module.
-2. Check in the generated artifact as `extensions/theme-data.generated.ts`.
-3. `extensions/themes.ts` imports and re-exports it.
-
-### Source for generation
-
-The same Ghostty bundled themes currently at `/Applications/cmux.app/Contents/Resources/ghostty/themes/` or from the `mbadolato/iTerm2-Color-Schemes` repo's ghostty directory.
-
-### Suggested commit
-
-- `feat: embed full theme catalog`
-
----
-
-## Phase 10 — verification and release prep
-
-### Manual verification checklist
-
-1. `bun run typecheck`
-2. `/theme` → picker opens
-3. navigate → iTerm2 updates live within debounce window
-4. Pi theme updates live
-5. `Esc` → both restore exactly
-6. reopen → `Enter` → confirmed in both
-7. `/theme "Tomorrow Night Burns"` → direct apply works
-8. settings persist across reload
-
-### Grep checklist
-
-- `grep -R "cmux" extensions/` → zero (cmux.ts deleted)
-- `grep -R "ghostty" extensions/` → zero or generation script only
-- `grep -R "pi-cmux-theme-picker" .` → zero
-
-## Suggested commit sequence
-
-1. `refactor: rename cmux-era concepts to pi-term terminology`
-2. `feat: add embedded theme catalog with Tomorrow Night Burns`
-3. `feat: add iterm2 adapter with parallel color apply`
-4. `feat: drive picker from embedded themes and iterm2`
-5. `refactor: rename pi theme artifacts for pi-term`
-6. `refactor: remove cmux integration from entrypoint`
-7. `refactor: migrate settings to pi-term paths`
-8. `refactor: remove legacy cmux adapter`
-9. `feat: embed full theme catalog`
-10. `docs: update README for iTerm2 embedded theme workflow`
-
-## Known risks and mitigations
-
-### Risk: parallel apply causes visual flicker (properties land out of order)
-
-Observed behavior: iTerm2 applies properties as they arrive. With `Promise.all`, bg might change before fg, causing a brief flash.
-
-Mitigation:
-- The debounce window (200ms default) means this only happens once per selection, not per keystroke.
-- In practice during testing the flash was not noticeable.
-- If it becomes a problem, could apply bg+fg first, then ANSI palette.
-
-### Risk: connection drops mid-preview
-
-Mitigation:
-- `ensureConnection()` reconnects if needed.
-- If reconnection fails, notify user and degrade gracefully (Pi-only preview).
-
-### Risk: `@shadr/iterm2-ts` auth dialog pops up
-
-The SDK uses `osascript` to request an auth cookie from iTerm2. On first use, iTerm2 may show a permission dialog.
-
-Mitigation:
-- Document the one-time permission requirement.
-- The SDK caches credentials after first approval.
-
-### Risk: startup sync becomes surprising
-
-Mitigation:
-- Disabled by default in the first pass.
-- Only explicit `/theme` actions change the terminal.
-
-### Risk: full theme import is noisy
-
-Mitigation:
-- Land one-theme end-to-end first.
-- Import full catalog in a separate commit with generated code.
-
-## Immediate next action
-
-Begin Phase 1 and Phase 2 together:
-
-1. Rename runtime terminology in `extensions/`.
-2. Add `extensions/themes.ts` with `Tomorrow Night Burns`.
-3. Do not stop to re-plan unless runtime findings contradict this document.
+1. `bun run typecheck` passes ✔
+2. Load extension in Pi against an active iTerm2 session
+3. `/theme` opens picker; arrow keys navigate without lag ✔
+4. Preview applies to both iTerm2 and Pi UI ✔
+5. `esc` restores original terminal and Pi colors exactly ✔
+6. `enter` confirms Pi theme; terminal colors stay (session-local only)
+7. New tabs do NOT get the theme (expected — persistence not implemented)

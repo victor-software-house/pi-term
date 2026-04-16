@@ -2,8 +2,8 @@
  * Extension settings — persisted as JSON on disk.
  *
  * Config files (project overrides global):
- *   ~/.pi/agent/extensions/pi-cmux-theme-picker.json  (global)
- *   <cwd>/.pi/extensions/pi-cmux-theme-picker.json    (project)
+ *   ~/.pi/agent/extensions/pi-term.json  (global)
+ *   <cwd>/.pi/extensions/pi-term.json    (project)
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { join, dirname } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { DEFAULT_THEME_PARAMS, type ThemeParams } from "./types.js";
 
-const CONFIG_FILENAME = "pi-cmux-theme-picker.json";
+const CONFIG_FILENAME = "pi-term.json";
 
 export interface ThemeOverride {
 	enabled: boolean;
@@ -19,14 +19,14 @@ export interface ThemeOverride {
 }
 
 export interface Settings {
-	autoSync: boolean;
+	currentTheme: string | null;
 	themeParams: ThemeParams;
 	previewDebounceMs: number;
 	themeOverrides: Record<string, ThemeOverride>;
 }
 
 const DEFAULTS: Settings = {
-	autoSync: false,
+	currentTheme: null,
 	themeParams: { ...DEFAULT_THEME_PARAMS },
 	previewDebounceMs: 200,
 	themeOverrides: {},
@@ -37,6 +37,19 @@ let current: Settings = {
 	themeParams: { ...DEFAULTS.themeParams },
 	themeOverrides: {},
 };
+
+// --- Current theme ---
+
+/** Get the stored theme name (null if none confirmed yet). */
+export function getCurrentTheme(): string | null {
+	return current.currentTheme ?? null;
+}
+
+/** Store the confirmed theme name and persist to disk. */
+export function setCurrentTheme(name: string | null): void {
+	current.currentTheme = name;
+	writeConfigFile(globalConfigPath(), current);
+}
 
 // --- Paths ---
 

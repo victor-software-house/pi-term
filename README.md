@@ -1,46 +1,56 @@
 # pi-term
 
-Live terminal theme picker for [Pi](https://pi.dev), currently being rebuilt around iTerm2 with embedded themes and debounced preview.
+Live iTerm2 theme picker for [Pi](https://pi.dev).
 
-![pi-term preview](assets/preview.png)
+Browse, filter, and live-preview 463 embedded themes directly in the Pi TUI. Changes apply to both iTerm2 colors (via `@shadr/iterm2-ts`) and the Pi UI theme simultaneously.
 
-## Status
+## Commands
 
-This repository is a hard fork of `pi-cmux-theme-picker`.
+- **`/theme`** — open the interactive picker: search, filter dark/light, navigate with arrow keys, preview on the fly
+- **`/theme "Theme Name"`** — apply a named theme directly without the picker
+- **`/theme-settings`** — configure Pi theme generation parameters (color source mapping, weights, tints)
 
-The new direction is:
+## Controls
 
-- iTerm2-first
-- embedded theme catalog
-- live preview through iTerm2 APIs
-- Pi theme generation kept where useful
+| Key | Action |
+|:----|:-------|
+| `↑` / `↓` | navigate |
+| `type` | filter by name |
+| `tab` | cycle all / dark / light |
+| `backspace` | delete search character |
+| `enter` | apply selected theme |
+| `esc` | cancel and restore original colors |
 
-The current codebase still contains cmux-era implementation details while the fork is being renamed and migrated.
+## Features
 
-## Planned behavior
-
-- **`/theme`** — open an inline picker to browse, filter, search, and live-preview embedded themes
-- **`/theme "Theme Name"`** — apply a named theme directly
-- **`/theme-settings`** — configure preview timing and Pi theme generation parameters
-- optional startup sync based on the active terminal state or explicit theme selection
+- **463 embedded themes** — full iTerm2 Color Schemes catalog, no runtime file system access
+- **Live preview** — ~260ms parallel apply via `@shadr/iterm2-ts`; trailing-only debounce keeps keyboard input instant
+- **Exact restore on cancel** — per-session snapshot, not named-preset based
+- **Pi UI sync** — Pi theme JSON written and applied on confirm
+- **Per-theme parameter overrides** — tune color mapping per theme slug via `/theme-settings`
 
 ## Install
 
-Not ready for install yet.
+```bash
+pi install github:victor-software-house/pi-term
+```
 
-This fork is currently in migration from `pi-cmux-theme-picker` to `pi-term`.
-
-## Migration plan
-
-See [PLAN.md](PLAN.md).
+Requires iTerm2. First use will show a one-time iTerm2 authorization dialog.
 
 ## Requirements
 
-Target environment for the new implementation:
-
 - iTerm2
-- Pi with `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui`
-- Node/Bun toolchain for extension development
+- Pi (`@mariozechner/pi-coding-agent` + `@mariozechner/pi-tui`)
+- Bun or Node for development
+
+## Development
+
+```bash
+bun install
+bun run typecheck
+```
+
+Conventional Commits are enforced. A changeset is required for any releasable change — see [AGENTS.md](AGENTS.md) for full commit and release workflow.
 
 ## License
 
